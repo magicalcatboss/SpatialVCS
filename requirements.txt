@@ -16,3 +16,4 @@ sentence-transformers       # Text -> vector embeddings
 faiss-cpu                   # Facebook vector search
 chromadb                    # Alternative vector DB
 Pillow                      # Image processing
+scipy                       # Distance calculation for rule-based spatial diff

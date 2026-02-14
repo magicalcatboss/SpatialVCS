@@ -10,6 +10,12 @@ export default function DashboardView() {
     const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
     const [showSettings, setShowSettings] = useState(false);
     const [activeScanId, setActiveScanId] = useState('');
+    const [scanList, setScanList] = useState([]);
+    const [beforeScanId, setBeforeScanId] = useState('');
+    const [afterScanId, setAfterScanId] = useState('');
+    const [diffThreshold, setDiffThreshold] = useState(0.5);
+    const [diffResult, setDiffResult] = useState(null);
+    const [diffLoading, setDiffLoading] = useState(false);
 
     // Save API Key
     const handleSaveKey = (key) => {
@@ -59,6 +65,33 @@ export default function DashboardView() {
         }
     }, [lastMessage]);
 
+    const fetchScans = async () => {
+        try {
+            const res = await fetch('/spatial/scans');
+            if (!res.ok) return;
+            const data = await res.json();
+            const scans = Array.isArray(data.scans) ? data.scans : [];
+            setScanList(scans);
+
+            if (!beforeScanId && scans.length > 0) {
+                setBeforeScanId(scans[0].scan_id);
+            }
+            if (!afterScanId && scans.length > 1) {
+                setAfterScanId(scans[1].scan_id);
+            } else if (!afterScanId && scans.length > 0) {
+                setAfterScanId(scans[0].scan_id);
+            }
+        } catch (err) {
+            console.error("Fetch scans failed:", err);
+        }
+    };
+
+    useEffect(() => {
+        fetchScans();
+        const timer = setInterval(fetchScans, 5000);
+        return () => clearInterval(timer);
+    }, []);
+
     // Search Logic
     const handleSearch = async (e) => {
         e.preventDefault();
@@ -91,6 +124,44 @@ export default function DashboardView() {
             console.error("Search Exception:", err);
             alert("Search error (see console)");
             setSearchResults([]);
+        }
+    };
+
+    const handleRunDiff = async (e) => {
+        e.preventDefault();
+        if (!beforeScanId || !afterScanId) {
+            alert("Please select both before/after scans.");
+            return;
+        }
+        setDiffLoading(true);
+        try {
+            const res = await fetch('/spatial/diff', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey
+                },
+                body: JSON.stringify({
+                    scan_id_before: beforeScanId,
+                    scan_id_after: afterScanId,
+                    threshold: Number(diffThreshold),
+                })
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                console.error("Diff failed:", res.status, errText);
+                alert(`Diff failed: ${res.status} ${res.statusText}`);
+                setDiffResult(null);
+                return;
+            }
+            const data = await res.json();
+            setDiffResult(data);
+        } catch (err) {
+            console.error("Diff exception:", err);
+            alert("Diff error (see console)");
+            setDiffResult(null);
+        } finally {
+            setDiffLoading(false);
         }
     };
 
@@ -244,6 +315,70 @@ export default function DashboardView() {
                                 )}
                             </div>
                         ))}
+
+                        <div className="border-t border-slate-800 pt-4 mt-4">
+                            <h3 className="text-xs font-mono text-primary/80 mb-3">SPATIAL DIFF</h3>
+                            <form onSubmit={handleRunDiff} className="space-y-2 mb-3">
+                                <select
+                                    value={beforeScanId}
+                                    onChange={(e) => setBeforeScanId(e.target.value)}
+                                    className="w-full bg-surface-dark border border-slate-700 rounded p-2 text-xs text-white"
+                                >
+                                    <option value="">Select BEFORE scan</option>
+                                    {scanList.map((s) => (
+                                        <option key={`before-${s.scan_id}`} value={s.scan_id}>
+                                            {s.scan_id}
+                                        </option>
+                                    ))}
+                                </select>
+                                <select
+                                    value={afterScanId}
+                                    onChange={(e) => setAfterScanId(e.target.value)}
+                                    className="w-full bg-surface-dark border border-slate-700 rounded p-2 text-xs text-white"
+                                >
+                                    <option value="">Select AFTER scan</option>
+                                    {scanList.map((s) => (
+                                        <option key={`after-${s.scan_id}`} value={s.scan_id}>
+                                            {s.scan_id}
+                                        </option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.1"
+                                    value={diffThreshold}
+                                    onChange={(e) => setDiffThreshold(e.target.value)}
+                                    className="w-full bg-surface-dark border border-slate-700 rounded p-2 text-xs text-white"
+                                    placeholder="Threshold (meters)"
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={diffLoading}
+                                    className="w-full bg-primary text-black rounded py-2 text-xs font-bold disabled:opacity-60"
+                                >
+                                    {diffLoading ? 'RUNNING...' : 'RUN DIFF'}
+                                </button>
+                            </form>
+
+                            {diffResult && (
+                                <div className="space-y-2">
+                                    <div className="text-[11px] text-slate-300">
+                                        {diffResult.summary}
+                                    </div>
+                                    {Array.isArray(diffResult.events) && diffResult.events.map((ev, idx) => (
+                                        <div key={idx} className="border border-slate-700 rounded p-2 text-[11px]">
+                                            <div className="font-mono text-primary">
+                                                {ev.type} · {ev.label}
+                                            </div>
+                                            {typeof ev.distance === 'number' && (
+                                                <div className="text-slate-400">distance: {ev.distance.toFixed(3)}m</div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
 

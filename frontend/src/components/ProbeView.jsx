@@ -9,6 +9,7 @@ export default function ProbeView() {
     const [framesSent, setFramesSent] = useState(0);
     const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
     const [showSettings, setShowSettings] = useState(false);
+    const [pose, setPose] = useState({ alpha: 0, beta: 0, gamma: 0, enabled: false });
 
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
@@ -41,6 +42,19 @@ export default function ProbeView() {
     };
 
     // Camera Logic
+    useEffect(() => {
+        const onOrientation = (event) => {
+            setPose({
+                alpha: event.alpha ?? 0,
+                beta: event.beta ?? 0,
+                gamma: event.gamma ?? 0,
+                enabled: true,
+            });
+        };
+        window.addEventListener('deviceorientation', onOrientation, true);
+        return () => window.removeEventListener('deviceorientation', onOrientation, true);
+    }, []);
+
     useEffect(() => {
         async function startCamera() {
             try {
@@ -79,6 +93,11 @@ export default function ProbeView() {
                 type: 'frame',
                 scan_id: scanId,
                 timestamp: Date.now() / 1000,
+                pose: {
+                    alpha: pose.alpha,
+                    beta: pose.beta,
+                    gamma: pose.gamma,
+                },
                 image: base64
             }));
             setFramesSent(prev => prev + 1);
@@ -86,7 +105,7 @@ export default function ProbeView() {
         } else {
             addLog(`⏳ WS not open (state: ${readyState})`);
         }
-    }, [readyState, scanId, sendMessage, framesSent]);
+    }, [readyState, scanId, sendMessage, framesSent, pose.alpha, pose.beta, pose.gamma]);
 
     useEffect(() => {
         if (isScanning) {
@@ -109,6 +128,9 @@ export default function ProbeView() {
                 addLog('🛑 Stop signal sent');
             }
         } else {
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission().catch(() => {});
+            }
             setIsScanning(true);
         }
     };
@@ -182,6 +204,7 @@ export default function ProbeView() {
                         <div>FRAMES: {framesSent}</div>
                         <div>SESSION: {scanId}</div>
                         <div>WS: {connectionText}</div>
+                        <div>POSE: {pose.enabled ? `${pose.alpha.toFixed(0)}/${pose.beta.toFixed(0)}/${pose.gamma.toFixed(0)}` : 'N/A'}</div>
                     </div>
                 </div>
 

@@ -1,115 +1,166 @@
-import numpy as np
 import json
 import os
+from typing import Optional
 
 # Lazy-load heavy dependencies
 _encoder = None
-_faiss = None
+_chroma = None
 vector_dim = 384
+
 
 def _get_encoder():
     global _encoder
     if _encoder is None:
         try:
             from sentence_transformers import SentenceTransformer
-            _encoder = SentenceTransformer('all-MiniLM-L6-v2')
+
+            _encoder = SentenceTransformer("all-MiniLM-L6-v2")
             print("✅ Sentence Transformer model loaded.")
         except Exception as e:
             print(f"⚠️ SentenceTransformer not available: {e}")
     return _encoder
 
-def _get_faiss():
-    global _faiss
-    if _faiss is None:
+
+def _get_chroma():
+    global _chroma
+    if _chroma is None:
         try:
-            import faiss as _f
-            _faiss = _f
-        except ImportError:
-            print("⚠️ FAISS not available.")
-    return _faiss
+            import chromadb
+
+            _chroma = chromadb
+        except Exception as e:
+            print(f"⚠️ ChromaDB not available: {e}")
+    return _chroma
+
 
 class SpatialMemory:
-    def __init__(self, index_path="data/memory/spatial_index.faiss"):
+    def __init__(self, index_path: str = "data/memory/spatial_index.json"):
+        # Keep old argument name compatibility, but use ChromaDB persist dir.
         self.index_path = index_path
+        self.persist_dir = "data/chroma"
         self.metadata = []
-        self.index = None
+        self.collection = None
         self._initialized = False
+        self._id_counter = 0
 
     def _ensure_init(self):
-        """Lazy-init: only load FAISS index when first needed."""
+        """Lazy-init: only load Chroma collection when first needed."""
         if self._initialized:
             return
         self._initialized = True
-        
-        faiss = _get_faiss()
-        if faiss is None:
+
+        chroma = _get_chroma()
+        if chroma is None:
             return
-            
-        if os.path.exists(self.index_path):
-            self.index = faiss.read_index(self.index_path)
-            meta_path = self.index_path.replace(".faiss", ".json")
-            if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
-                    self.metadata = json.load(f)
-        else:
-            self.index = faiss.IndexFlatIP(vector_dim)
+
+        os.makedirs(self.persist_dir, exist_ok=True)
+        client = chroma.PersistentClient(path=self.persist_dir)
+        self.collection = client.get_or_create_collection(name="spatial_memory")
+
+        # Backfill local cache for compatibility with existing consumers.
+        try:
+            snapshot = self.collection.get(include=["metadatas", "documents"])
+            docs = snapshot.get("documents", []) or []
+            metas = snapshot.get("metadatas", []) or []
+            self.metadata = []
+            for i, doc in enumerate(docs):
+                meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+                self.metadata.append({"text": doc, **meta})
+            self._id_counter = len(self.metadata)
+        except Exception as e:
+            print(f"⚠️ Failed to warm Chroma cache: {e}")
+
+    def _serialize_meta(self, meta: dict):
+        """Chroma metadata values should be scalar; stash nested values as JSON."""
+        serialized = {}
+        for key, value in meta.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                serialized[key] = value
+            else:
+                serialized[key] = json.dumps(value, ensure_ascii=False)
+        return serialized
+
+    def _deserialize_meta(self, meta: Optional[dict]):
+        if not isinstance(meta, dict):
+            return {}
+        restored = {}
+        for key, value in meta.items():
+            if isinstance(value, str):
+                try:
+                    restored[key] = json.loads(value)
+                    continue
+                except Exception:
+                    pass
+            restored[key] = value
+        return restored
 
     def add_observation(self, text: str, meta: dict):
         self._ensure_init()
         encoder = _get_encoder()
-        faiss = _get_faiss()
-        
-        if encoder is None or faiss is None or self.index is None:
-            print("⚠️ Cannot add observation: ML models not loaded.")
+
+        if encoder is None or self.collection is None:
+            print("⚠️ Cannot add observation: ML models/storage not loaded.")
             return
-            
-        embedding = encoder.encode([text])
-        faiss.normalize_L2(embedding)
-        self.index.add(embedding)
+
+        embedding = encoder.encode([text])[0]
+        item_id = f"obs_{self._id_counter}"
+        self._id_counter += 1
+
+        serialized_meta = self._serialize_meta(meta)
+        self.collection.add(
+            ids=[item_id],
+            documents=[text],
+            embeddings=[embedding.tolist()],
+            metadatas=[serialized_meta],
+        )
         self.metadata.append({"text": text, **meta})
-        
+
     def search(self, query: str, k: int = 3, scan_id: str = None):
         self._ensure_init()
         encoder = _get_encoder()
-        faiss = _get_faiss()
-        
-        if encoder is None or faiss is None or self.index is None:
+
+        if encoder is None or self.collection is None:
             return []
-            
-        query_vec = encoder.encode([query])
-        faiss.normalize_L2(query_vec)
-        
-        # Robust filtering: search more, then filter
-        search_k = k * 10 if scan_id else k
-        distances, indices = self.index.search(query_vec, search_k)
-        
+
+        query_embedding = encoder.encode([query])[0].tolist()
+        fetch_k = max(k * 10, k) if scan_id else k
+        response = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=fetch_k,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        docs = (response.get("documents") or [[]])[0]
+        metas = (response.get("metadatas") or [[]])[0]
+        distances = (response.get("distances") or [[]])[0]
+
         results = []
-        for i, idx in enumerate(indices[0]):
-            if idx != -1 and idx < len(self.metadata):
-                item = self.metadata[idx]
-                
-                # Filter by scan_id if requested
-                if scan_id and item.get("scan_id") != scan_id:
-                    continue
-                    
-                results.append({
-                    "score": float(distances[0][i]),
-                    "description": item["text"],
-                    "metadata": item
-                })
-                if len(results) >= k:
-                    break
+        for i, doc in enumerate(docs):
+            raw_meta = metas[i] if i < len(metas) else {}
+            meta = self._deserialize_meta(raw_meta)
+
+            if scan_id and meta.get("scan_id") != scan_id:
+                continue
+
+            distance = float(distances[i]) if i < len(distances) else 1.0
+            score = 1.0 / (1.0 + max(distance, 0.0))
+            results.append(
+                {
+                    "score": score,
+                    "description": doc,
+                    "metadata": {"text": doc, **meta},
+                }
+            )
+            if len(results) >= k:
+                break
+
         return results
 
     def save(self):
-        faiss = _get_faiss()
-        if faiss is None or self.index is None:
-            return
-        os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
-        faiss.write_index(self.index, self.index_path)
-        with open(self.index_path.replace(".faiss", ".json"), "w") as f:
-            json.dump(self.metadata, f)
+        # Chroma PersistentClient commits to disk automatically.
+        self._ensure_init()
+        return
 
     def is_ready(self) -> bool:
         self._ensure_init()
-        return (_get_encoder() is not None) and (_get_faiss() is not None) and (self.index is not None)
+        return (_get_encoder() is not None) and (self.collection is not None)

@@ -10,6 +10,7 @@ import json
 import uuid
 import base64
 import time
+import math
 from dotenv import load_dotenv
 
 # Import Services
@@ -55,10 +56,98 @@ def _ensure_scan(scan_id: str, source: Optional[str] = None) -> dict:
             "frames": 0,
             "object_count": 0,
             "objects": [],
+            "detections": [],
             "last_frame_path": None,
             "updated_at": None,
         }
     return spatial_scans[scan_id]
+
+
+def _rotation_matrix_from_orientation(alpha: float, beta: float, gamma: float):
+    """
+    Convert device orientation angles (degrees) to a 3x3 rotation matrix.
+    Approximation: R = Rz(alpha) * Rx(beta) * Ry(gamma).
+    """
+    a = math.radians(alpha)
+    b = math.radians(beta)
+    g = math.radians(gamma)
+
+    ca, sa = math.cos(a), math.sin(a)
+    cb, sb = math.cos(b), math.sin(b)
+    cg, sg = math.cos(g), math.sin(g)
+
+    rz = [
+        [ca, -sa, 0.0],
+        [sa, ca, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    rx = [
+        [1.0, 0.0, 0.0],
+        [0.0, cb, -sb],
+        [0.0, sb, cb],
+    ]
+    ry = [
+        [cg, 0.0, sg],
+        [0.0, 1.0, 0.0],
+        [-sg, 0.0, cg],
+    ]
+
+    def matmul(a3, b3):
+        return [
+            [
+                a3[i][0] * b3[0][j] + a3[i][1] * b3[1][j] + a3[i][2] * b3[2][j]
+                for j in range(3)
+            ]
+            for i in range(3)
+        ]
+
+    return matmul(matmul(rz, rx), ry)
+
+
+def _pose_matrix_str_from_orientation(alpha: float, beta: float, gamma: float) -> str:
+    rot = _rotation_matrix_from_orientation(alpha, beta, gamma)
+    pose = [
+        [rot[0][0], rot[0][1], rot[0][2], 0.0],
+        [rot[1][0], rot[1][1], rot[1][2], 0.0],
+        [rot[2][0], rot[2][1], rot[2][2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return ",".join(str(pose[r][c]) for r in range(4) for c in range(4))
+
+
+def _record_detections(scan_record: dict, detections: list, timestamp: float):
+    for det in detections:
+        scan_record["detections"].append({
+            "label": det.get("label", ""),
+            "confidence": float(det.get("confidence", 0.0)),
+            "position_3d": det.get("position_3d", {}),
+            "timestamp": timestamp,
+            "frame_path": det.get("frame_path", ""),
+        })
+
+
+def _euclidean_distance(a: dict, b: dict) -> float:
+    ax, ay, az = float(a.get("x", 0.0)), float(a.get("y", 0.0)), float(a.get("z", 0.0))
+    bx, by, bz = float(b.get("x", 0.0)), float(b.get("y", 0.0)), float(b.get("z", 0.0))
+    try:
+        from scipy.spatial.distance import euclidean
+        return float(euclidean([ax, ay, az], [bx, by, bz]))
+    except Exception:
+        dx, dy, dz = ax - bx, ay - by, az - bz
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def _latest_position_by_label(detections: list) -> Dict[str, dict]:
+    latest = {}
+    for item in detections:
+        label = item.get("label")
+        position = item.get("position_3d")
+        if not label or not isinstance(position, dict):
+            continue
+        prev = latest.get(label)
+        if prev is None or float(item.get("timestamp", 0.0)) > float(prev.get("timestamp", 0.0)):
+            latest[label] = item
+    return latest
 
 # --- Helpers ---
 def _get_gemini():
@@ -131,12 +220,10 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 # --- Step 2: Build Pose string from gyroscope ---
                 # Web sends {alpha, beta, gamma}; we construct a simplified pose
                 pose_data = data.get("pose", {})
-                alpha = pose_data.get("alpha", 0)
-                beta = pose_data.get("beta", 0)
-                gamma = pose_data.get("gamma", 0)
-                # For Web (no LiDAR), we use identity matrix with estimated depth
-                # The pose string is expected as 16 comma-separated floats (4x4 matrix)
-                pose_str = "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"
+                alpha = float(pose_data.get("alpha", 0) or 0)
+                beta = float(pose_data.get("beta", 0) or 0)
+                gamma = float(pose_data.get("gamma", 0) or 0)
+                pose_str = _pose_matrix_str_from_orientation(alpha, beta, gamma)
                 estimated_depth = 1.5  # Default assumed distance
 
                 # --- Step 3: YOLO Detection + 3D Coordinate Estimation ---
@@ -157,6 +244,7 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 scan_record["updated_at"] = timestamp
                 if detections:
                     scan_record["last_frame_path"] = detections[0].get("frame_path")
+                    _record_detections(scan_record, detections, timestamp)
 
                 for obj in gemini_objects:
                     frame_path = detections[0]["frame_path"] if detections else ""
@@ -357,6 +445,7 @@ class SpatialQueryRequest(BaseModel):
 class SpatialDiffRequest(BaseModel):
     scan_id_before: str
     scan_id_after: str
+    threshold: float = 0.5
 
 @app.post("/spatial/scan/frame")
 async def receive_frame(
@@ -379,6 +468,7 @@ async def receive_frame(
     scan_record["updated_at"] = timestamp
     if detections:
         scan_record["last_frame_path"] = detections[0].get("frame_path")
+        _record_detections(scan_record, detections, timestamp)
     
     if detections:
         description_data = client.describe_for_spatial(image_bytes)
@@ -447,15 +537,55 @@ async def spatial_diff(request: SpatialDiffRequest, x_api_key: Optional[str] = H
         if sid not in spatial_scans:
             raise HTTPException(status_code=404, detail=f"Scan '{sid}' not found")
     
-    client = get_gemini_client(x_api_key)
-    before = spatial_scans[request.scan_id_before].get("objects", [])
-    after = spatial_scans[request.scan_id_after].get("objects", [])
-    
-    result = client.compare_spatial_diffs(before, after)
+    before_scan = spatial_scans[request.scan_id_before]
+    after_scan = spatial_scans[request.scan_id_after]
+    before_latest = _latest_position_by_label(before_scan.get("detections", []))
+    after_latest = _latest_position_by_label(after_scan.get("detections", []))
+
+    before_labels = set(before_latest.keys())
+    after_labels = set(after_latest.keys())
+    common_labels = before_labels & after_labels
+
+    events = []
+    for label in sorted(common_labels):
+        old_pos = before_latest[label].get("position_3d", {})
+        new_pos = after_latest[label].get("position_3d", {})
+        dist = _euclidean_distance(new_pos, old_pos)
+        if dist > request.threshold:
+            events.append({
+                "type": "MOVE",
+                "label": label,
+                "distance": round(dist, 4),
+                "from": old_pos,
+                "to": new_pos,
+            })
+
+    for label in sorted(after_labels - before_labels):
+        events.append({
+            "type": "ADDED",
+            "label": label,
+            "distance": None,
+            "from": None,
+            "to": after_latest[label].get("position_3d", {}),
+        })
+
+    for label in sorted(before_labels - after_labels):
+        events.append({
+            "type": "REMOVED",
+            "label": label,
+            "distance": None,
+            "from": before_latest[label].get("position_3d", {}),
+            "to": None,
+        })
+
+    summary = f"{len(events)} changes detected (threshold={request.threshold}m)."
     return {
         "before_scan": request.scan_id_before,
         "after_scan": request.scan_id_after,
-        **result
+        "threshold": request.threshold,
+        "change_count": len(events),
+        "events": events,
+        "summary": summary,
     }
 
 @app.get("/spatial/scans")
@@ -468,6 +598,7 @@ def list_scans():
                 "source": data.get("source"),
                 "frames": data.get("frames", 0),
                 "object_count": data.get("object_count", 0),
+                "detection_count": len(data.get("detections", [])),
                 "updated_at": data.get("updated_at"),
                 "last_frame": os.path.basename(data.get("last_frame_path") or ""),
             }
