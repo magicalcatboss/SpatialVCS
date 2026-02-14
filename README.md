@@ -115,6 +115,12 @@ npm run dev -- --host
 - **Backend 422 Error?** Fixed in latest version (scan_id is optional).
 
 ## Team Members
-- **Hanson He** ([GitHub](https://github.com/HansonHe-UW), [LinkedIn](https://linkedin.com/in/shengyuan-he))
-- **Yingxuan Wang** ([GitHub](https://github.com/magicalcatboss), [LinkedIn](https://www.linkedin.com/in/yingxuan-wang-uw))
-- **Molly Xie** ([GitHub](https://github.com/molly-xie-uw), [LinkedIn](https://linkedin.com/in/molly-xie-uw))
+
+<div align="center">
+
+| [<img src="https://github.com/HansonHe-UW.png?size=100" width="100"><br><sub><b>Hanson He</b></sub>](https://github.com/HansonHe-UW) | [<img src="https://github.com/magicalcatboss.png?size=100" width="100"><br><sub><b>Yingxuan Wang</b></sub>](https://github.com/magicalcatboss) | [<img src="https://github.com/molly-xie-uw.png?size=100" width="100"><br><sub><b>Molly Xie</b></sub>](https://github.com/molly-xie-uw) |
+| :---: | :---: | :---: |
+| [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/HansonHe-UW) | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/magicalcatboss) | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/molly-xie-uw) |
+| [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/in/shengyuan-he) | [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/yingxuan-wang-uw) | [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/in/molly-xie-uw) |
+
+</div>
