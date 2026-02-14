@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import useWebSocket, { ReadyState } from 'react-use-websocket';
-import { Search, Database, Box, Play, Wifi, Cpu, Activity, Clock, Settings, RefreshCw, Trash2 } from 'lucide-react';
+import { Search, Database, Box, Play, Wifi, Cpu, Activity, Clock, Settings, RefreshCw, Trash2, Mic, Volume2 } from 'lucide-react';
 import SpatialView3D from './SpatialView3D';
 
 export default function DashboardView() {
@@ -231,6 +231,48 @@ export default function DashboardView() {
 
     const [searchAnswer, setSearchAnswer] = useState('');
     const [isSearching, setIsSearching] = useState(false);
+    const [isListening, setIsListening] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+
+    // Voice Search — uses browser SpeechRecognition API
+    const startVoiceSearch = () => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert('Speech recognition not supported in this browser');
+            return;
+        }
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        setIsListening(true);
+        recognition.start();
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            setQuery(transcript);
+            setIsListening(false);
+            // Auto-submit search
+            setTimeout(() => {
+                document.getElementById('search-form')?.requestSubmit();
+            }, 100);
+        };
+        recognition.onerror = () => setIsListening(false);
+        recognition.onend = () => setIsListening(false);
+    };
+
+    // TTS — speak the search answer aloud
+    const speakAnswer = (text) => {
+        if (!text || isSpeaking) return;
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
+        utterance.onstart = () => setIsSpeaking(true);
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        speechSynthesis.cancel();
+        speechSynthesis.speak(utterance);
+    };
 
     // Search Logic
     const handleSearch = async (e) => {
@@ -546,25 +588,46 @@ export default function DashboardView() {
                 <div className="col-span-4 bg-surface-darker/50 border-l border-slate-800 pl-6 flex flex-col">
                     <h2 className="text-sm font-mono text-primary/80 mb-4 flex items-center"><Cpu className="w-4 h-4 mr-2" /> SEMANTIC QUERY</h2>
 
-                    <form onSubmit={handleSearch} className="mb-6 relative">
+                    <form id="search-form" onSubmit={handleSearch} className="mb-6 relative">
                         <input
                             type="text"
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
                             placeholder="Example: 'Where are my keys?'"
-                            className="w-full bg-surface-dark border border-slate-700 rounded-lg py-3 pl-4 pr-12 text-sm text-white focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                            className="w-full bg-surface-dark border border-slate-700 rounded-lg py-3 pl-4 pr-20 text-sm text-white focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
                         />
-                        <button type="submit" disabled={isSearching} className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-primary rounded text-black hover:bg-white transition-colors disabled:opacity-50">
-                            {isSearching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                        </button>
+                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center space-x-1">
+                            <button
+                                type="button"
+                                onClick={startVoiceSearch}
+                                disabled={isListening}
+                                className={`p-1.5 rounded transition-colors ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-700 text-slate-400 hover:text-white hover:bg-slate-600'}`}
+                                title="Voice Search"
+                            >
+                                <Mic className="w-4 h-4" />
+                            </button>
+                            <button type="submit" disabled={isSearching} className="p-1.5 bg-primary rounded text-black hover:bg-white transition-colors disabled:opacity-50">
+                                {isSearching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                            </button>
+                        </div>
                     </form>
 
                     {/* AI Answer Block */}
                     {searchAnswer && (
                         <div className="mb-4 bg-primary/10 border border-primary/30 p-3 rounded-lg">
-                            <h3 className="text-[10px] font-mono text-primary mb-1 uppercase tracking-wider flex items-center">
-                                <Cpu className="w-3 h-3 mr-1" /> AI Analysis
-                            </h3>
+                            <div className="flex justify-between items-start">
+                                <h3 className="text-[10px] font-mono text-primary mb-1 uppercase tracking-wider flex items-center">
+                                    <Cpu className="w-3 h-3 mr-1" /> AI Analysis
+                                </h3>
+                                <button
+                                    onClick={() => speakAnswer(searchAnswer)}
+                                    disabled={isSpeaking}
+                                    className={`p-1 rounded transition-colors ${isSpeaking ? 'text-primary animate-pulse' : 'text-slate-400 hover:text-white'}`}
+                                    title="Read aloud"
+                                >
+                                    <Volume2 className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
                             <p className="text-sm text-white leading-relaxed font-sans">{searchAnswer}</p>
                         </div>
                     )}
