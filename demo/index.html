@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SpatialVCS — Demo Console</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --accent: #00f0ff;
+            --accent2: #8b5cf6;
+            --green: #22c55e;
+            --red: #ef4444;
+            --yellow: #eab308;
+            --text: #e2e8f0;
+            --muted: #64748b;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, rgba(0, 240, 255, 0.08), rgba(139, 92, 246, 0.08));
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 20px;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header .version {
+            font-size: 12px;
+            color: var(--muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 6px;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.online {
+            background: var(--green);
+        }
+
+        .status-dot.offline {
+            background: var(--red);
+            animation: none;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--muted);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        .tab:hover {
+            color: var(--text);
+        }
+
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        /* Panels */
+        .panel {
+            display: none;
+            padding: 24px;
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+
+        .card h3 {
+            font-size: 14px;
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Video */
+        #camera-feed {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: #000;
+        }
+
+        #capture-canvas {
+            display: none;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            color: #000;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(0, 240, 255, 0.3);
+        }
+
+        .btn-danger {
+            background: var(--red);
+            color: #fff;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        /* Log */
+        .log-container {
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        .log-entry {
+            color: var(--muted);
+        }
+
+        .log-entry .time {
+            color: var(--accent);
+        }
+
+        .log-entry.success {
+            color: var(--green);
+        }
+
+        .log-entry.error {
+            color: var(--red);
+        }
+
+        .log-entry.info {
+            color: var(--yellow);
+        }
+
+        /* Detection cards */
+        .detection-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .detection-item {
+            background: rgba(0, 240, 255, 0.05);
+            border: 1px solid rgba(0, 240, 255, 0.15);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 13px;
+        }
+
+        .detection-item .label {
+            font-weight: 700;
+            color: var(--accent);
+            font-size: 15px;
+        }
+
+        .detection-item .conf {
+            color: var(--green);
+        }
+
+        .detection-item .pos {
+            color: var(--muted);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+        }
+
+        /* Search */
+        .search-box {
+            display: flex;
+            gap: 8px;
+        }
+
+        .search-box input {
+            flex: 1;
+            padding: 12px 16px;
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 15px;
+            font-family: 'Inter', sans-serif;
+            outline: none;
+        }
+
+        .search-box input:focus {
+            border-color: var(--accent);
+        }
+
+        .search-box input::placeholder {
+            color: var(--muted);
+        }
+
+        .answer-box {
+            background: linear-gradient(135deg, rgba(0, 240, 255, 0.08), rgba(139, 92, 246, 0.08));
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 12px;
+            font-size: 15px;
+            line-height: 1.6;
+            display: none;
+        }
+
+        .answer-box .answer-label {
+            font-size: 11px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Stats */
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .stat {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            flex: 1;
+            text-align: center;
+        }
+
+        .stat .num {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .stat .label {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Input row */
+        .input-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .input-row label {
+            font-size: 13px;
+            color: var(--muted);
+            min-width: 80px;
+        }
+
+        .input-row input {
+            padding: 8px 12px;
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            outline: none;
+            width: 200px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="header">
+        <div>
+            <h1>⬡ SpatialVCS</h1>
+            <div class="version">Demo Console v2.1.0</div>
+        </div>
+        <div id="connection-status">
+            <span class="status-dot offline" id="status-dot"></span>
+            <span id="status-text" style="font-size: 13px;">Disconnected</span>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('probe')">📱 Probe (Scanner)</div>
+        <div class="tab" onclick="switchTab('dashboard')">💻 Dashboard (Viewer)</div>
+        <div class="tab" onclick="switchTab('search')">🔍 Search (Query)</div>
+    </div>
+
+    <!-- ===== PROBE TAB ===== -->
+    <div class="panel active" id="panel-probe">
+        <div class="stats-row">
+            <div class="stat">
+                <div class="num" id="stat-frames">0</div>
+                <div class="label">Frames Sent</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="stat-objects">0</div>
+                <div class="label">Objects Found</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="stat-fps">0</div>
+                <div class="label">FPS</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>⚙️ Configuration</h3>
+            <div class="input-row">
+                <label>Server IP</label>
+                <input type="text" id="server-ip" value="localhost:8000" placeholder="192.168.x.x:8000">
+            </div>
+            <div class="input-row">
+                <label>Scan ID</label>
+                <input type="text" id="scan-id" value="demo_scan_01">
+            </div>
+            <div class="input-row">
+                <label>Interval</label>
+                <input type="number" id="frame-interval" value="1500" min="500" max="5000" step="100">
+                <span style="font-size:12px; color:var(--muted)">ms</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📷 Camera Feed</h3>
+            <video id="camera-feed" autoplay playsinline muted></video>
+            <canvas id="capture-canvas"></canvas>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-start" onclick="startScanning()">▶ Start Scan</button>
+                <button class="btn btn-danger" id="btn-stop" onclick="stopScanning()" disabled>■ Stop</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📡 Probe Log</h3>
+            <div class="log-container" id="probe-log"></div>
+        </div>
+    </div>
+
+    <!-- ===== DASHBOARD TAB ===== -->
+    <div class="panel" id="panel-dashboard">
+        <div class="stats-row">
+            <div class="stat">
+                <div class="num" id="dash-frames">0</div>
+                <div class="label">Frames Received</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="dash-objects">0</div>
+                <div class="label">Total Objects</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="dash-probes">0</div>
+                <div class="label">Active Probes</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>🔗 Dashboard Connection</h3>
+            <div class="input-row">
+                <label>Server IP</label>
+                <input type="text" id="dash-server-ip" value="localhost:8000">
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-dash-connect" onclick="connectDashboard()">Connect</button>
+                <button class="btn btn-danger" id="btn-dash-disconnect" onclick="disconnectDashboard()"
+                    disabled>Disconnect</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>🎯 Live Detections</h3>
+            <div class="detection-grid" id="detection-grid">
+                <div style="color: var(--muted); font-size: 13px;">Waiting for data from Probe...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📡 Dashboard Log</h3>
+            <div class="log-container" id="dashboard-log"></div>
+        </div>
+    </div>
+
+    <!-- ===== SEARCH TAB ===== -->
+    <div class="panel" id="panel-search">
+        <div class="card">
+            <h3>🔍 Spatial Query</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px;">
+                Ask about objects in the scanned space. Requires scanning first.
+            </p>
+            <div class="input-row">
+                <label>Scan ID</label>
+                <input type="text" id="search-scan-id" value="demo_scan_01">
+            </div>
+            <div class="input-row">
+                <label>API Key</label>
+                <input type="text" id="api-key" placeholder="Leave empty to use server .env">
+            </div>
+            <div class="search-box">
+                <input type="text" id="search-query" placeholder="Where are my keys? 钥匙在哪？"
+                    onkeydown="if(event.key==='Enter') doSearch()">
+                <button class="btn btn-primary" onclick="doSearch()">Search</button>
+            </div>
+            <div class="answer-box" id="answer-box">
+                <div class="answer-label">Gemini Answer</div>
+                <div id="answer-text"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📊 Search Results</h3>
+            <div id="search-results" style="color: var(--muted); font-size: 13px;">
+                No search results yet. Try scanning first, then search.
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📋 Quick API Tests</h3>
+            <div class="btn-group">
+                <button class="btn btn-secondary" onclick="testHealth()">🏥 Health Check</button>
+                <button class="btn btn-secondary" onclick="testScans()">📂 List Scans</button>
+                <button class="btn btn-secondary" onclick="testTTS()">🔊 TTS Test</button>
+            </div>
+            <div class="log-container" id="api-log" style="margin-top: 12px; min-height: 60px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // Protocol Auto-Detection (HTTP→ws://, HTTPS→wss://)
+        // ============================================================
+        const isSecure = location.protocol === 'https:';
+        const wsProto = isSecure ? 'wss' : 'ws';
+        const httpProto = isSecure ? 'https' : 'http';
+
+        // ============================================================
+        // State
+        // ============================================================
+        let probeWs = null;
+        let dashWs = null;
+        let cameraStream = null;
+        let scanInterval = null;
+        let frameCount = 0;
+        let totalObjects = 0;
+        let dashFrameCount = 0;
+        let dashObjectCount = 0;
+        let lastFrameTime = Date.now();
+
+        // ============================================================
+        // Tab Switching
+        // ============================================================
+        function switchTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.querySelector(`.tab[onclick="switchTab('${name}')"]`).classList.add('active');
+            document.getElementById(`panel-${name}`).classList.add('active');
+        }
+
+        // ============================================================
+        // Logging
+        // ============================================================
+        function log(containerId, msg, type = '') {
+            const container = document.getElementById(containerId);
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.innerHTML = `<span class="time">[${time}]</span> ${msg}`;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // ============================================================
+        // PROBE: Camera + WebSocket Sender
+        // ============================================================
+        async function startScanning() {
+            const serverIp = document.getElementById('server-ip').value;
+            const scanId = document.getElementById('scan-id').value;
+            const interval = parseInt(document.getElementById('frame-interval').value);
+
+            // 1. Open Camera
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+                });
+                document.getElementById('camera-feed').srcObject = cameraStream;
+                log('probe-log', 'Camera opened ✅', 'success');
+            } catch (e) {
+                log('probe-log', `Camera error: ${e.message}`, 'error');
+                return;
+            }
+
+            // 2. Connect WebSocket
+            const wsUrl = `${wsProto}://${serverIp}/ws/probe/demo_probe`;
+            try {
+                probeWs = new WebSocket(wsUrl);
+                probeWs.onopen = () => {
+                    log('probe-log', `Connected to ${wsUrl} ✅`, 'success');
+                    setStatus(true);
+                };
+                probeWs.onclose = () => {
+                    log('probe-log', 'WebSocket closed', 'error');
+                    setStatus(false);
+                };
+                probeWs.onerror = (e) => {
+                    log('probe-log', `WebSocket error: connection failed`, 'error');
+                };
+                probeWs.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'ack') {
+                        totalObjects += data.objects_found || 0;
+                        document.getElementById('stat-objects').textContent = totalObjects;
+                        log('probe-log', `ACK: Frame #${data.frame} → ${data.objects_found} objects`, 'info');
+                    } else if (data.type === 'error') {
+                        log('probe-log', `Server error: ${data.message}`, 'error');
+                    }
+                };
+            } catch (e) {
+                log('probe-log', `Failed to connect: ${e}`, 'error');
+                return;
+            }
+
+            // 3. Start Frame Capture Loop
+            const video = document.getElementById('camera-feed');
+            const canvas = document.getElementById('capture-canvas');
+            const ctx = canvas.getContext('2d');
+
+            scanInterval = setInterval(() => {
+                if (!probeWs || probeWs.readyState !== WebSocket.OPEN) return;
+
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+                ctx.drawImage(video, 0, 0);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+
+                const packet = {
+                    type: 'frame',
+                    scan_id: scanId,
+                    timestamp: Date.now() / 1000,
+                    pose: { alpha: 0, beta: 0, gamma: 0 },
+                    image: dataUrl
+                };
+
+                probeWs.send(JSON.stringify(packet));
+                frameCount++;
+                document.getElementById('stat-frames').textContent = frameCount;
+
+                // FPS calculation
+                const now = Date.now();
+                const fps = (1000 / (now - lastFrameTime)).toFixed(1);
+                lastFrameTime = now;
+                document.getElementById('stat-fps').textContent = fps;
+
+            }, interval);
+
+            document.getElementById('btn-start').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+            log('probe-log', `Scanning started (interval: ${interval}ms, scan_id: ${scanId})`, 'success');
+        }
+
+        function stopScanning() {
+            if (scanInterval) clearInterval(scanInterval);
+            if (probeWs) probeWs.close();
+            if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
+            document.getElementById('camera-feed').srcObject = null;
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            setStatus(false);
+            log('probe-log', 'Scanning stopped.', 'info');
+        }
+
+        function setStatus(online) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            dot.className = `status-dot ${online ? 'online' : 'offline'}`;
+            text.textContent = online ? 'Connected' : 'Disconnected';
+        }
+
+        // ============================================================
+        // DASHBOARD: WebSocket Receiver
+        // ============================================================
+        function connectDashboard() {
+            const serverIp = document.getElementById('dash-server-ip').value;
+            const wsUrl = `${wsProto}://${serverIp}/ws/dashboard/demo_dashboard`;
+
+            dashWs = new WebSocket(wsUrl);
+            dashWs.onopen = () => {
+                log('dashboard-log', `Connected to ${wsUrl} ✅`, 'success');
+                document.getElementById('btn-dash-connect').disabled = true;
+                document.getElementById('btn-dash-disconnect').disabled = false;
+                document.getElementById('dash-probes').textContent = '1';
+            };
+            dashWs.onclose = () => {
+                log('dashboard-log', 'Disconnected', 'error');
+                document.getElementById('btn-dash-connect').disabled = false;
+                document.getElementById('btn-dash-disconnect').disabled = true;
+            };
+            dashWs.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'detection') {
+                    dashFrameCount++;
+                    dashObjectCount += (data.objects || []).length;
+                    document.getElementById('dash-frames').textContent = dashFrameCount;
+                    document.getElementById('dash-objects').textContent = dashObjectCount;
+
+                    // Render detection cards
+                    const grid = document.getElementById('detection-grid');
+                    grid.innerHTML = '';
+                    (data.objects || []).forEach(obj => {
+                        const pos = obj.position || {};
+                        const div = document.createElement('div');
+                        div.className = 'detection-item';
+                        div.innerHTML = `
+                    <div class="label">${obj.label}</div>
+                    <div class="conf">Confidence: ${(obj.confidence * 100).toFixed(1)}%</div>
+                    <div class="pos">x:${(pos.x || 0).toFixed(2)} y:${(pos.y || 0).toFixed(2)} z:${(pos.z || 0).toFixed(2)}</div>
+                `;
+                        grid.appendChild(div);
+                    });
+
+                    log('dashboard-log', data.log || `Frame received with ${(data.objects || []).length} objects`, 'success');
+                } else if (data.type === 'probe_disconnected') {
+                    log('dashboard-log', `Probe ${data.source} disconnected`, 'error');
+                    document.getElementById('dash-probes').textContent = '0';
+                }
+            };
+        }
+
+        function disconnectDashboard() {
+            if (dashWs) dashWs.close();
+        }
+
+        // ============================================================
+        // SEARCH: REST API
+        // ============================================================
+        async function doSearch() {
+            const query = document.getElementById('search-query').value;
+            const scanId = document.getElementById('search-scan-id').value;
+            const apiKey = document.getElementById('api-key').value;
+            if (!query) return;
+
+            const serverIp = document.getElementById('server-ip').value;
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['X-API-Key'] = apiKey;
+
+            document.getElementById('search-results').innerHTML = '<div style="color:var(--yellow)">Searching...</div>';
+
+            try {
+                const res = await fetch(`${httpProto}://${serverIp}/spatial/query`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ query, scan_id: scanId, top_k: 5 })
+                });
+                const data = await res.json();
+
+                // Show answer
+                if (data.answer) {
+                    document.getElementById('answer-box').style.display = 'block';
+                    document.getElementById('answer-text').textContent = data.answer;
+                }
+
+                // Show results
+                const container = document.getElementById('search-results');
+                if (!data.results || data.results.length === 0) {
+                    container.innerHTML = '<div style="color: var(--muted);">No results found. Try scanning first!</div>';
+                    return;
+                }
+                container.innerHTML = '';
+                data.results.forEach((r, i) => {
+                    const div = document.createElement('div');
+                    div.className = 'detection-item';
+                    div.style.marginBottom = '8px';
+                    div.innerHTML = `
+                <div class="label">#${i + 1} — Score: ${(r.score * 100).toFixed(1)}%</div>
+                <div style="margin-top: 4px;">${r.description}</div>
+                ${r.frame_url ? `<a href="${httpProto}://${serverIp}${r.frame_url}" target="_blank" style="color: var(--accent); font-size: 12px;">View Frame →</a>` : ''}
+            `;
+                    container.appendChild(div);
+                });
+            } catch (e) {
+                document.getElementById('search-results').innerHTML = `<div style="color:var(--red)">Error: ${e.message}</div>`;
+            }
+        }
+
+        // ============================================================
+        // Quick API Tests
+        // ============================================================
+        async function testHealth() {
+            const ip = document.getElementById('server-ip').value;
+            try {
+                const res = await fetch(`${httpProto}://${ip}/`);
+                const data = await res.json();
+                log('api-log', `Health: ${JSON.stringify(data)}`, 'success');
+            } catch (e) {
+                log('api-log', `Health check failed: ${e.message}`, 'error');
+            }
+        }
+
+        async function testScans() {
+            const ip = document.getElementById('server-ip').value;
+            try {
+                const res = await fetch(`${httpProto}://${ip}/spatial/scans`);
+                const data = await res.json();
+                log('api-log', `Scans: ${JSON.stringify(data)}`, 'success');
+            } catch (e) {
+                log('api-log', `List scans failed: ${e.message}`, 'error');
+            }
+        }
+
+        async function testTTS() {
+            const ip = document.getElementById('server-ip').value;
+            try {
+                const res = await fetch(`${httpProto}://${ip}/audio/speak`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: 'SpatialVCS is online. Ready to scan your reality.', lang: 'en' })
+                });
+                if (res.ok) {
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.play();
+                    log('api-log', 'TTS playing...', 'success');
+                } else {
+                    log('api-log', `TTS failed: ${res.status}`, 'error');
+                }
+            } catch (e) {
+                log('api-log', `TTS error: ${e.message}`, 'error');
+            }
+        }
+    </script>
+</body>
+
+</html>

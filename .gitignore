@@ -1,0 +1,12 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+key.pem
+frontend/node_modules/
+frontend/dist/
+data/frames/
+data/memory/

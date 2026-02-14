@@ -1,0 +1,18 @@
+# --- Core (Original Toolkit) ---
+fastapi==0.110.0
+uvicorn==0.27.1
+python-multipart==0.0.9
+google-genai>=1.0.0
+openai>=1.14.0
+opencv-python-headless>=4.9.0
+gTTS>=2.5.1
+numpy
+pydantic
+python-dotenv
+
+# --- SpatialVCS (New) ---
+ultralytics>=8.0.0          # YOLOv8 object detection
+sentence-transformers       # Text -> vector embeddings
+faiss-cpu                   # Facebook vector search
+chromadb                    # Alternative vector DB
+Pillow                      # Image processing
