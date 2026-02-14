@@ -1,6 +1,30 @@
 import json
 import os
+import sys
 from typing import Optional
+
+# Python 3.14+ PEP 649 compat: pydantic v1 (used by chromadb) reads
+# namespace["__annotations__"] which is None under deferred evaluation.
+# Patch the metaclass once so that __annotate_func__ is evaluated eagerly.
+if sys.version_info >= (3, 14):
+    try:
+        import pydantic.v1.main as _pv1_main
+
+        _orig_mc_new = _pv1_main.ModelMetaclass.__new__
+
+        def _patched_mc_new(mcs, name, bases, namespace, **kwargs):
+            if namespace.get("__annotations__") is None:
+                _af = namespace.get("__annotate_func__")
+                if _af is not None:
+                    try:
+                        namespace["__annotations__"] = _af(1)
+                    except Exception:
+                        namespace["__annotations__"] = {}
+            return _orig_mc_new(mcs, name, bases, namespace, **kwargs)
+
+        _pv1_main.ModelMetaclass.__new__ = _patched_mc_new
+    except Exception:
+        pass
 
 # Lazy-load heavy dependencies
 _encoder = None
@@ -42,6 +66,7 @@ class SpatialMemory:
         self.collection = None
         self._initialized = False
         self._id_counter = 0
+        self._warned_not_ready = False
 
     def _ensure_init(self):
         """Lazy-init: only load Chroma collection when first needed."""
@@ -74,7 +99,10 @@ class SpatialMemory:
         """Chroma metadata values should be scalar; stash nested values as JSON."""
         serialized = {}
         for key, value in meta.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
+            # Chroma metadata does not accept None; use empty string sentinel.
+            if value is None:
+                serialized[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
                 serialized[key] = value
             else:
                 serialized[key] = json.dumps(value, ensure_ascii=False)
@@ -99,7 +127,9 @@ class SpatialMemory:
         encoder = _get_encoder()
 
         if encoder is None or self.collection is None:
-            print("⚠️ Cannot add observation: ML models/storage not loaded.")
+            if not self._warned_not_ready:
+                print("⚠️ Cannot add observation: ML models/storage not loaded. (further warnings suppressed)")
+                self._warned_not_ready = True
             return
 
         embedding = encoder.encode([text])[0]
@@ -164,3 +194,24 @@ class SpatialMemory:
     def is_ready(self) -> bool:
         self._ensure_init()
         return (_get_encoder() is not None) and (self.collection is not None)
+
+    def reset_database(self):
+        """Dangerous: Wipes all data from ChromaDB."""
+        self._ensure_init()
+        chroma = _get_chroma()
+        if chroma is None:
+            return
+
+        try:
+            client = chroma.PersistentClient(path=self.persist_dir)
+            try:
+                client.delete_collection(name="spatial_memory")
+            except Exception:
+                pass # Maybe didn't exist
+            
+            self.collection = client.get_or_create_collection(name="spatial_memory")
+            self.metadata = []
+            self._id_counter = 0
+            print("✅ Database reset complete.")
+        except Exception as e:
+            print(f"❌ Database reset failed: {e}")

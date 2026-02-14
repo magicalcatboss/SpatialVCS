@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import useWebSocket, { ReadyState } from 'react-use-websocket';
-import { Search, Database, Box, Play, Wifi, Cpu, Activity, Clock, Settings } from 'lucide-react';
+import { Search, Database, Box, Play, Wifi, Cpu, Activity, Clock, Settings, RefreshCw, Trash2 } from 'lucide-react';
 
 export default function DashboardView() {
     const [query, setQuery] = useState('');
@@ -16,6 +16,15 @@ export default function DashboardView() {
     const [diffThreshold, setDiffThreshold] = useState(0.5);
     const [diffResult, setDiffResult] = useState(null);
     const [diffLoading, setDiffLoading] = useState(false);
+    const [isLiveDiff, setIsLiveDiff] = useState(false);
+    const [referenceObjects, setReferenceObjects] = useState({});
+    const [trajectories, setTrajectories] = useState({});
+    const [lastSeen, setLastSeen] = useState({});
+
+    // Persistence Buffer: Map<Key, {object, lastSeenTime}>
+    const persistenceMap = useRef(new Map());
+    const trajectoriesRef = useRef({});
+    const lastSeenRef = useRef({});
 
     // Save API Key
     const handleSaveKey = (key) => {
@@ -32,6 +41,53 @@ export default function DashboardView() {
         onOpen: () => console.log('Dashboard Connected'),
     });
 
+    // Helper: Calculate Euclidean Distance
+    const getDistance = (p1, p2) => {
+        const x = (p1.x || 0) - (p2.x || 0);
+        const y = (p1.y || 0) - (p2.y || 0);
+        const z = (p1.z || 0) - (p2.z || 0);
+        return Math.sqrt(x * x + y * y + z * z);
+    };
+
+    // Helper: Hash string to color
+    const stringToColor = (str) => {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = str.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+        return '#' + '00000'.substring(0, 6 - c.length) + c;
+    }
+
+    const toStableFallbackKey = (obj) => {
+        const baseLabel = obj?.yolo_label || obj?.label || 'unknown';
+        const bbox = obj?.bbox || [0, 0, 0, 0];
+        const cx = Math.floor((((bbox[0] || 0) + (bbox[2] || 0)) / 2) / 96);
+        const cy = Math.floor((((bbox[1] || 0) + (bbox[3] || 0)) / 2) / 96);
+        const z = obj?.position?.z ?? 0;
+        const zb = Math.round(z * 2);
+        return `${baseLabel}_cell_${cx}_${cy}_${zb}`;
+    };
+
+    const normalizeDetection = (key, obj) => {
+        const position = obj?.position || {
+            x: obj?.x ?? 0,
+            y: obj?.y ?? 0,
+            z: obj?.z ?? 0
+        };
+        return {
+            id: key,
+            label: obj?.label || 'unknown',
+            yolo_label: obj?.yolo_label || obj?.label || 'unknown',
+            details: obj?.details || '',
+            confidence: Number(obj?.confidence ?? 0),
+            track_id: Number(obj?.track_id ?? -1),
+            position
+        };
+    };
+
+    const canonicalLabel = (obj) => (obj?.yolo_label || obj?.label || 'unknown');
+
     // Handle Incoming Data
     useEffect(() => {
         if (lastMessage !== null) {
@@ -41,15 +97,84 @@ export default function DashboardView() {
                     if (data.scan_id) {
                         setActiveScanId(data.scan_id);
                     }
-                    // Update Live Detections (keep last 6)
-                    setLiveDetections(prev => {
-                        const newItems = data.objects.map(obj => ({
-                            ...obj,
-                            id: Math.random().toString(36).substr(2, 9),
-                            timestamp: Date.now()
-                        }));
-                        return [...newItems, ...prev].slice(0, 6);
-                    });
+
+                    // --- PERSISTENCE BUFFER LOGIC (Spatial State Stream) ---
+                    const now = Date.now();
+                    const stateVector = data.state_vector || {};
+
+                    // 1. Update Buffer with incoming Frame State
+                    if (Object.keys(stateVector).length > 0) {
+                        Object.entries(stateVector).forEach(([key, vec]) => {
+                            persistenceMap.current.set(key, { ...normalizeDetection(key, vec), lastSeen: now });
+                        });
+                    } else if (data.objects) {
+                        // Fallback for legacy format or untracked objects
+                        data.objects.forEach(obj => {
+                            const key = obj.track_id > -1 ? `${obj.label}_${obj.track_id}` : toStableFallbackKey(obj);
+                            persistenceMap.current.set(key, { ...normalizeDetection(key, obj), lastSeen: now });
+                        });
+                    }
+
+                    // 2. Prune Stale Items (> 500ms)
+                    // This handles YOLO flicker. If object missing for < 0.5s, keep showing it.
+                    for (const [key, val] of persistenceMap.current.entries()) {
+                        if (now - val.lastSeen > 1800) {
+                            persistenceMap.current.delete(key);
+                        }
+                    }
+
+                    // 3. Render State
+                    const liveSnapshot = Array.from(persistenceMap.current.values());
+                    setLiveDetections(liveSnapshot);
+                    // -------------------------------------------------------
+
+                    // --- LIVE DIFF LOGIC (uses same persistence snapshot as LIVE INTERCEPT) ---
+                    if (isLiveDiff && Object.keys(referenceObjects).length > 0) {
+                        const events = [];
+                        const newTraj = { ...trajectoriesRef.current };
+                        const newLastSeen = { ...lastSeenRef.current };
+                        const liveKeys = new Set();
+
+                        liveSnapshot.forEach(liveObj => {
+                            const key = canonicalLabel(liveObj);
+                            const display = liveObj?.label || key;
+                            liveKeys.add(key);
+
+                            if (!newTraj[key]) newTraj[key] = [];
+                            newTraj[key].push(liveObj.position);
+                            if (newTraj[key].length > 50) newTraj[key].shift();
+                            newLastSeen[key] = now;
+
+                            const refObj = referenceObjects[key];
+                            if (refObj) {
+                                const dist = getDistance(liveObj.position, refObj.position);
+                                if (dist > Number(diffThreshold)) {
+                                    events.push({ type: 'MOVE', label: display, distance: dist });
+                                }
+                            } else {
+                                events.push({ type: 'ADDED', label: display, distance: null });
+                            }
+                        });
+
+                        Object.keys(referenceObjects).forEach(refKey => {
+                            if (!liveKeys.has(refKey)) {
+                                events.push({
+                                    type: 'MISSING',
+                                    label: referenceObjects[refKey]?.display || refKey,
+                                    distance: null
+                                });
+                            }
+                        });
+
+                        trajectoriesRef.current = newTraj;
+                        lastSeenRef.current = newLastSeen;
+                        setTrajectories(newTraj);
+                        setLastSeen(newLastSeen);
+                        setDiffResult({
+                            summary: `LIVE: ${events.length} changes detected`,
+                            events
+                        });
+                    }
 
                     // Update Stats
                     setStats(prev => ({
@@ -63,7 +188,7 @@ export default function DashboardView() {
                 console.error("Parse error", e);
             }
         }
-    }, [lastMessage]);
+    }, [lastMessage, isLiveDiff, referenceObjects, diffThreshold]);
 
     const fetchScans = async () => {
         try {
@@ -92,9 +217,16 @@ export default function DashboardView() {
         return () => clearInterval(timer);
     }, []);
 
+    const [searchAnswer, setSearchAnswer] = useState('');
+    const [isSearching, setIsSearching] = useState(false);
+
     // Search Logic
     const handleSearch = async (e) => {
         e.preventDefault();
+        setIsSearching(true);
+        setSearchAnswer('');
+        setSearchResults([]);
+
         try {
             // Use relative URL (proxy)
             const res = await fetch('/spatial/query', {
@@ -105,27 +237,83 @@ export default function DashboardView() {
                 },
                 body: JSON.stringify({
                     query,
-                    query,
                     top_k: 4,
-                    // Search ALL scans by default (remove filter)
-                    // ...(activeScanId ? { scan_id: activeScanId } : {})
                 })
             });
 
             if (!res.ok) {
                 const errText = await res.text();
-                console.error("Search failed:", res.status, errText);
-                alert(`Search failed: ${res.status} ${res.statusText}`); // Simple feedback
-                setSearchResults([]);
+                setSearchAnswer(`Error: ${res.statusText}`);
+                setIsSearching(false);
                 return;
             }
 
             const data = await res.json();
-            setSearchResults(data.results || []);
+            setSearchAnswer(data.answer || "No synthesis available.");
+
+            // --- SMART SEARCH ENHANCEMENT ---
+            // If we have live diff results, cross-reference them!
+            let results = data.results || [];
+
+            if (isLiveDiff && diffResult && diffResult.events) {
+                results = results.map(res => {
+                    const relevantEvent = diffResult.events.find(ev =>
+                        res.description.toLowerCase().includes(ev.label.toLowerCase()) ||
+                        ev.label.toLowerCase().includes(res.label?.toLowerCase() || '')
+                    );
+
+                    if (relevantEvent) {
+                        return {
+                            ...res,
+                            description: `${res.description} \n\n⚠️ [LIVE INSIGHT]: This object appears to be ${relevantEvent.type} (Distance: ${relevantEvent.distance?.toFixed(2)}m)!`
+                        };
+                    }
+                    return res;
+                });
+            }
+            // --------------------------------
+
+            setSearchResults(results);
         } catch (err) {
             console.error("Search Exception:", err);
-            alert("Search error (see console)");
-            setSearchResults([]);
+            setSearchAnswer("Error: Network failed.");
+        } finally {
+            setIsSearching(false);
+        }
+    };
+
+    // Fetch Reference Objects for Live Diff
+    const toggleLiveDiff = async () => {
+        if (!isLiveDiff) {
+            // STARTING
+            if (!beforeScanId) {
+                alert("Please select a BEFORE scan as reference!");
+                return;
+            }
+            try {
+                const res = await fetch(`/spatial/memory/${beforeScanId}`);
+                if (!res.ok) throw new Error("Failed to fetch scan data");
+                const data = await res.json();
+
+                // Build map by canonical detector label (compatible with live yolo_label).
+                const refMap = {};
+                (data.detections || []).forEach(d => {
+                    const key = canonicalLabel(d);
+                    refMap[key] = {
+                        position: d.position_3d,
+                        display: d.gemini_name || d.label || key
+                    };
+                });
+                setReferenceObjects(refMap);
+                setIsLiveDiff(true);
+            } catch (e) {
+                alert("Error fetching reference scan: " + e.message);
+                setIsLiveDiff(false);
+            }
+        } else {
+            // STOPPING
+            setIsLiveDiff(false);
+            setDiffResult(null);
         }
     };
 
@@ -252,6 +440,48 @@ export default function DashboardView() {
                         <div className={`w-2 h-2 rounded-full ${readyState === ReadyState.OPEN ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
                         <span className="text-xs font-mono font-bold">{readyState === ReadyState.OPEN ? 'ONLINE' : 'OFFLINE'}</span>
                     </div>
+
+                    {/* Force Refresh Button */}
+                    <button
+                        onClick={() => {
+                            setLiveDetections([]);
+                            setStats({ frames: 0, objects: 0, fps: 0 });
+                            setDiffResult(null);
+                            fetchScans();
+                            window.location.reload(); // Hard reload as requested
+                        }}
+                        className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded border border-slate-700 transition-colors mr-2"
+                        title="Force Reload & Reset"
+                    >
+                        <RefreshCw className="w-4 h-4" />
+                    </button>
+
+                    {/* Wipe Database Button */}
+                    <button
+                        onClick={async () => {
+                            if (confirm("⚠️ DANGER: This will delete ALL scan history and spatial memory. Are you sure?")) {
+                                try {
+                                    const res = await fetch('/spatial/reset', {
+                                        method: 'DELETE',
+                                        headers: { 'x-api-key': apiKey }
+                                    });
+                                    if (!res.ok) {
+                                        const body = await res.json().catch(() => ({}));
+                                        alert("Wipe failed: " + (body.detail || res.statusText));
+                                        return;
+                                    }
+                                    alert("System Wiped.");
+                                    window.location.reload();
+                                } catch (e) {
+                                    alert("Wipe failed: " + e);
+                                }
+                            }
+                        }}
+                        className="p-2 bg-red-900/20 hover:bg-red-900/40 text-red-500 hover:text-red-400 rounded border border-red-900/50 transition-colors"
+                        title="WIPE ALL DATA (Factory Reset)"
+                    >
+                        <Trash2 className="w-4 h-4" />
+                    </button>
                 </div>
             </header>
 
@@ -264,9 +494,9 @@ export default function DashboardView() {
                     </div>
 
                     <div className="flex-1 grid grid-cols-3 gap-4 overflow-y-auto pr-2 content-start">
-                        {liveDetections.map((obj) => (
-                            <div key={obj.id} className="bg-surface-dark border border-slate-800 p-4 rounded-lg hover:border-primary/50 transition-colors group relative overflow-hidden">
-                                <div className="absolute top-0 right-0 p-2 opacity-50 text-[10px] font-mono text-slate-500">#{obj.id.toUpperCase()}</div>
+                        {liveDetections.map((obj, idx) => (
+                            <div key={obj.id || `${obj.label}-${idx}`} className="bg-surface-dark border border-slate-800 p-4 rounded-lg hover:border-primary/50 transition-colors group relative overflow-hidden">
+                                <div className="absolute top-0 right-0 p-2 opacity-50 text-[10px] font-mono text-slate-500">#{String(obj.id || `${obj.label}-${idx}`).toUpperCase()}</div>
                                 <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center mb-3 group-hover:bg-primary/20 transition-colors">
                                     <Box className="w-5 h-5 text-slate-400 group-hover:text-primary" />
                                 </div>
@@ -299,10 +529,20 @@ export default function DashboardView() {
                             placeholder="Example: 'Where are my keys?'"
                             className="w-full bg-surface-dark border border-slate-700 rounded-lg py-3 pl-4 pr-12 text-sm text-white focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
                         />
-                        <button type="submit" className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-primary rounded text-black hover:bg-white transition-colors">
-                            <Search className="w-4 h-4" />
+                        <button type="submit" disabled={isSearching} className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-primary rounded text-black hover:bg-white transition-colors disabled:opacity-50">
+                            {isSearching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
                         </button>
                     </form>
+
+                    {/* AI Answer Block */}
+                    {searchAnswer && (
+                        <div className="mb-4 bg-primary/10 border border-primary/30 p-3 rounded-lg">
+                            <h3 className="text-[10px] font-mono text-primary mb-1 uppercase tracking-wider flex items-center">
+                                <Cpu className="w-3 h-3 mr-1" /> AI Analysis
+                            </h3>
+                            <p className="text-sm text-white leading-relaxed font-sans">{searchAnswer}</p>
+                        </div>
+                    )}
 
                     <div className="flex-1 overflow-y-auto space-y-4">
                         {Array.isArray(searchResults) && searchResults.map((res, i) => (
@@ -361,6 +601,17 @@ export default function DashboardView() {
                                 >
                                     {diffLoading ? 'RUNNING...' : 'RUN DIFF'}
                                 </button>
+
+                                <button
+                                    type="button"
+                                    onClick={toggleLiveDiff}
+                                    className={`w-full mt-2 rounded py-2 text-xs font-bold transition-colors ${isLiveDiff
+                                        ? 'bg-red-500/20 text-red-400 border border-red-500/50 animate-pulse'
+                                        : 'bg-green-500/20 text-green-400 border border-green-500/50 hover:bg-green-500/30'
+                                        }`}
+                                >
+                                    {isLiveDiff ? 'STOP LIVE DIFF (BETA)' : 'START LIVE DIFF (BETA)'}
+                                </button>
                             </form>
 
                             {diffResult && (
@@ -378,6 +629,66 @@ export default function DashboardView() {
                                             )}
                                         </div>
                                     ))}
+                                </div>
+                            )}
+
+                            {/* Motion Tracker (Trajectories) */}
+                            {isLiveDiff && (
+                                <div className="mt-6 border-t border-slate-800 pt-4">
+                                    <h3 className="text-xs font-mono text-primary/80 mb-3 flex items-center">
+                                        <Activity className="w-3 h-3 mr-2" /> MOTION TRACKER (Top-Down X/Z)
+                                    </h3>
+                                    <div className="relative w-full h-48 bg-black/50 border border-slate-800 rounded overflow-hidden">
+                                        {/* Grid */}
+                                        <div className="absolute inset-0 grid grid-cols-4 grid-rows-4 pointer-events-none">
+                                            {[...Array(16)].map((_, i) => <div key={i} className="border-slate-800/30 border-[0.5px]"></div>)}
+                                        </div>
+
+                                        {/* Render Dots */}
+                                        {Object.entries(trajectories).map(([label, points]) => {
+                                            // Simple scaling: Map -2m to 2m range to 0-100%
+                                            const mapX = (x) => 50 + (x * 25); // Scale factor
+                                            const mapZ = (z) => 50 + (z * 25);
+
+                                            // Only show if active recently
+                                            if (Date.now() - (lastSeen[label] || 0) > 5000) return null;
+
+                                            const color = stringToColor(label);
+
+                                            return (
+                                                <React.Fragment key={label}>
+                                                    {/* Path */}
+                                                    <svg className="absolute inset-0 w-full h-full pointer-events-none">
+                                                        <polyline
+                                                            points={points.map(p => `${mapX(p.x)},${mapZ(p.z)}`).join(' ')}
+                                                            fill="none"
+                                                            stroke={color}
+                                                            strokeWidth="2"
+                                                            opacity="0.5"
+                                                        />
+                                                    </svg>
+
+                                                    {/* Current Point */}
+                                                    {points.length > 0 && (() => {
+                                                        const last = points[points.length - 1];
+                                                        return (
+                                                            <div
+                                                                className="absolute w-2 h-2 rounded-full transform -translate-x-1/2 -translate-y-1/2 shadow-[0_0_10px_currentColor]"
+                                                                style={{
+                                                                    left: `${mapX(last.x)}%`,
+                                                                    top: `${mapZ(last.z)}%`,
+                                                                    backgroundColor: color,
+                                                                    color: color
+                                                                }}
+                                                            >
+                                                                <span className="absolute top-3 left-1/2 -translate-x-1/2 text-[9px] font-mono whitespace-nowrap">{label}</span>
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </React.Fragment>
+                                            )
+                                        })}
+                                    </div>
                                 </div>
                             )}
                         </div>

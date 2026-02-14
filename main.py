@@ -11,13 +11,14 @@ import uuid
 import base64
 import time
 import math
+import asyncio
 from dotenv import load_dotenv
 
 # Import Services
 from services.vision import analyze_face_image
 from services.audio import text_to_speech_stream
 from services.llm import GeminiClient
-from services.video_processor import process_frame
+from services.video_processor import process_frame, crop_detections
 from services.spatial_memory import SpatialMemory
 from services.frame_annotator import annotate_frame
 from services.socket_manager import ConnectionManager
@@ -46,6 +47,21 @@ spatial_memory = SpatialMemory()
 socket_manager = ConnectionManager()
 spatial_scans: Dict[str, dict] = {}
 
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+YOLO_FRAME_STRIDE = _int_env("SPATIAL_YOLO_FRAME_STRIDE", 2)
+GEMINI_FRAME_STRIDE = _int_env("SPATIAL_GEMINI_FRAME_STRIDE", 3)
+MAX_GEMINI_CROPS = _int_env("SPATIAL_MAX_GEMINI_CROPS", 3, minimum=1)
+FALLBACK_KEY_BUCKET_PX = _int_env("SPATIAL_FALLBACK_KEY_BUCKET_PX", 96, minimum=16)
+GEMINI_LABEL_TTL_SEC = float(os.getenv("SPATIAL_GEMINI_LABEL_TTL_SEC", "20"))
+
 
 def _ensure_scan(scan_id: str, source: Optional[str] = None) -> dict:
     if scan_id not in spatial_scans:
@@ -57,10 +73,28 @@ def _ensure_scan(scan_id: str, source: Optional[str] = None) -> dict:
             "object_count": 0,
             "objects": [],
             "detections": [],
+            "gemini_label_cache": {},
             "last_frame_path": None,
             "updated_at": None,
         }
     return spatial_scans[scan_id]
+
+
+def _object_key_from_detection(det: dict) -> str:
+    """Build a stable key for persistence and Gemini label carry-over."""
+    tid = det.get("track_id", -1)
+    label = det.get("label", "object")
+    if tid > -1:
+        return f"{label}_{tid}"
+
+    bbox = det.get("bbox", [0, 0, 0, 0])
+    cx = int((bbox[0] + bbox[2]) / 2) if len(bbox) == 4 else 0
+    cy = int((bbox[1] + bbox[3]) / 2) if len(bbox) == 4 else 0
+    cell_x = cx // FALLBACK_KEY_BUCKET_PX
+    cell_y = cy // FALLBACK_KEY_BUCKET_PX
+    z_val = float(det.get("position_3d", {}).get("z", 0.0))
+    z_bucket = int(round(z_val * 2.0))
+    return f"{label}_cell_{cell_x}_{cell_y}_{z_bucket}"
 
 
 def _rotation_matrix_from_orientation(alpha: float, beta: float, gamma: float):
@@ -187,6 +221,13 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
             data = await websocket.receive_json()
             # Expected: {"type":"frame", "image":"base64...", "pose":{"alpha":0,"beta":0,"gamma":0}, "scan_id":"room_01"}
 
+            if data.get("type") == "auth":
+                msg_key = data.get("api_key")
+                if msg_key:
+                    gemini = GeminiClient(msg_key)
+                    await socket_manager.send_to_probe(client_id, {"type": "auth_ack"})
+                continue
+
             if data.get("type") == "stop_scan":
                 scan_id = data.get("scan_id", f"scan_{client_id}")
                 if scan_id in spatial_scans:
@@ -200,6 +241,13 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 continue
 
             if data.get("type") == "frame":
+                frame_api_key = data.get("api_key")
+                if frame_api_key:
+                    try:
+                        gemini = GeminiClient(frame_api_key)
+                    except Exception:
+                        pass
+
                 scan_id = data.get("scan_id", f"scan_{client_id}")
                 timestamp = data.get("timestamp", time.time())
                 frame_count += 1
@@ -227,56 +275,141 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 estimated_depth = 1.5  # Default assumed distance
 
                 # --- Step 3: YOLO Detection + 3D Coordinate Estimation ---
-                detections = process_frame(image_bytes, estimated_depth, pose_str, scan_id)
+                detections = []
+                frame_path = ""
+                should_run_yolo = (frame_count % YOLO_FRAME_STRIDE == 1)
+                if should_run_yolo:
+                    detections, frame_path = process_frame(
+                        image_bytes, estimated_depth, pose_str, scan_id, return_frame_path=True
+                    )
+                else:
+                    # Save this frame path without running detection to reduce 8m load spikes.
+                    _, frame_path = process_frame(
+                        image_bytes, estimated_depth, pose_str, scan_id, run_detection=False, return_frame_path=True
+                    )
 
-                # --- Step 4: Gemini Semantic Description (every 3rd frame to save API quota) ---
+                # --- Step 4: Gemini Semantic Description (per-object via crops) ---
                 gemini_objects = []
-                if gemini and detections and (frame_count % 3 == 1):
+                run_gemini = gemini and (frame_count % GEMINI_FRAME_STRIDE == 1)
+                if run_gemini and detections:
                     try:
-                        description_data = gemini.describe_for_spatial(image_bytes)
-                        gemini_objects = description_data.get("objects", [])
+                        crops = crop_detections(image_bytes, detections)
+                        pairs = [(c, d) for c, d in zip(crops, detections) if c is not None]
+                        pairs = pairs[:MAX_GEMINI_CROPS]
+
+                        async def _describe(crop, det):
+                            desc = await asyncio.to_thread(gemini.describe_crop, crop, det["label"])
+                            return desc, det
+
+                        results = await asyncio.gather(*[_describe(c, d) for c, d in pairs])
+                        for desc, det in results:
+                            gemini_obj = {
+                                "name": desc.get("name", det["label"]),
+                                "position": det.get("position_3d", {}),
+                                "details": desc.get("details", ""),
+                                "bbox": det.get("bbox"),
+                                "track_id": det.get("track_id", -1),
+                                "yolo_label": det["label"],
+                                "confidence": det["confidence"],
+                            }
+                            gemini_objects.append(gemini_obj)
+                            # Enrich the detection with Gemini description
+                            det["gemini_name"] = gemini_obj["name"]
+                            det["gemini_details"] = gemini_obj["details"]
                     except Exception as e:
-                        print(f"Gemini error: {e}")
+                        print(f"Gemini crop error: {e}")
 
                 # --- Step 5: Store in Spatial Memory ---
                 scan_record = _ensure_scan(scan_id, source=client_id)
                 scan_record["frames"] += 1
                 scan_record["updated_at"] = timestamp
-                if detections:
+                if frame_path:
+                    scan_record["last_frame_path"] = frame_path
+                elif detections:
                     scan_record["last_frame_path"] = detections[0].get("frame_path")
+
+                if detections:
                     _record_detections(scan_record, detections, timestamp)
 
                 for obj in gemini_objects:
-                    frame_path = detections[0]["frame_path"] if detections else ""
                     meta = {
                         "scan_id": scan_id,
-                        "frame_path": frame_path,
+                        "frame_path": frame_path or (detections[0]["frame_path"] if detections else ""),
                         "timestamp": timestamp,
-                        "yolo_detections": detections,
-                        "details": obj,
+                        "bbox": obj.get("bbox"),
+                        "track_id": obj.get("track_id", -1),
+                        "yolo_label": obj.get("yolo_label", ""),
+                        "confidence": obj.get("confidence", 0),
+                        "position_3d": obj.get("position"),
                         "source": client_id
                     }
-                    text_to_index = f"{obj.get('name','')} {obj.get('position','')} {obj.get('details','')}"
-                    spatial_memory.add_observation(text_to_index, meta)
+                    text_to_index = f"{obj.get('name','')} {obj.get('details','')}"
+                    try:
+                        spatial_memory.add_observation(text_to_index, meta)
+                    except Exception as e:
+                        print(f"Spatial memory add failed: {e}")
                     scan_record["objects"].append({
                         "name": obj.get("name", ""),
-                        "position": obj.get("position", ""),
+                        "position": obj.get("position", {}),
                         "details": obj.get("details", ""),
                         "timestamp": timestamp,
-                        "frame_path": frame_path,
+                        "frame_path": meta["frame_path"],
                     })
 
                 scan_record["object_count"] += len(gemini_objects)
 
                 # --- Step 6: Broadcast Results to All Dashboards ---
                 broadcast_objects = []
+                state_vector = {} # Map<ID, Vector>
+                gemini_label_cache = scan_record.get("gemini_label_cache", {})
+
                 for d in detections:
-                    broadcast_objects.append({
-                        "label": d["label"],
+                    tid = d.get("track_id", -1)
+                    label = d["label"]
+                    obj_key = _object_key_from_detection(d)
+
+                    # Preserve the latest Gemini naming for this tracked object so
+                    # non-Gemini frames do not revert UI labels back to raw YOLO words.
+                    if d.get("gemini_name"):
+                        gemini_label_cache[obj_key] = {
+                            "name": d.get("gemini_name", label),
+                            "details": d.get("gemini_details", ""),
+                            "updated_at": float(timestamp),
+                        }
+
+                    cached = gemini_label_cache.get(obj_key)
+                    if cached and (float(timestamp) - float(cached.get("updated_at", 0.0)) <= GEMINI_LABEL_TTL_SEC):
+                        display_label = cached.get("name", label)
+                        display_details = cached.get("details", d.get("gemini_details", ""))
+                    else:
+                        display_label = d.get("gemini_name", label)
+                        display_details = d.get("gemini_details", "")
+                        if cached:
+                            gemini_label_cache.pop(obj_key, None)
+
+                    # Simplified Vector for Frontend
+                    vec = {
+                        "x": d.get("position_3d", {}).get("x", 0),
+                        "y": d.get("position_3d", {}).get("y", 0),
+                        "z": d.get("position_3d", {}).get("z", 0),
                         "confidence": d["confidence"],
+                        "track_id": tid,
+                        "label": display_label,
+                        "yolo_label": d["label"]
+                    }
+                    state_vector[obj_key] = vec
+
+                    broadcast_objects.append({
+                        "label": display_label,
+                        "yolo_label": d["label"],
+                        "details": display_details,
+                        "confidence": d["confidence"],
+                        "track_id": tid,
                         "bbox": d.get("bbox"),
                         "position": d.get("position_3d", {"x": 0, "y": 0, "z": estimated_depth})
                     })
+
+                scan_record["gemini_label_cache"] = gemini_label_cache
 
                 await socket_manager.broadcast_to_dashboards({
                     "type": "detection",
@@ -284,6 +417,7 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                     "scan_id": scan_id,
                     "frame_number": frame_count,
                     "objects": broadcast_objects,
+                    "state_vector": state_vector,
                     "gemini_objects": gemini_objects,
                     "pose": {"alpha": alpha, "beta": beta, "gamma": gamma},
                     "timestamp": timestamp,
@@ -299,10 +433,12 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
 
     except WebSocketDisconnect:
         socket_manager.disconnect_probe(client_id)
-        # Notify dashboards that probe left
-        await socket_manager.broadcast_to_dashboards({
-            "type": "probe_disconnected", "source": client_id
-        })
+        try:
+            await socket_manager.broadcast_to_dashboards({
+                "type": "probe_disconnected", "source": client_id
+            })
+        except Exception:
+            pass
     except Exception as e:
         print(f"Error in probe ws: {e}")
         socket_manager.disconnect_probe(client_id)
@@ -587,6 +723,28 @@ async def spatial_diff(request: SpatialDiffRequest, x_api_key: Optional[str] = H
         "events": events,
         "summary": summary,
     }
+
+@app.delete("/spatial/reset")
+async def reset_spatial_data(x_api_key: Optional[str] = Header(None)):
+    """
+    Reset all spatial memory and scans.
+    """
+    # Require API key to prevent accidental or unauthorized reset.
+    get_gemini_client(x_api_key)
+    
+    # 1. Clear Chroma
+    spatial_memory.reset_database()
+    
+    # 2. Clear In-Memory Scans
+    spatial_scans.clear()
+    
+    # 3. Notify Dashboards
+    await socket_manager.broadcast_to_dashboards({
+        "type": "system_reset",
+        "log": "SYSTEM RESET: All spatial memory cleared."
+    })
+    
+    return {"status": "ok", "message": "Spatial memory cleared"}
 
 @app.get("/spatial/scans")
 def list_scans():

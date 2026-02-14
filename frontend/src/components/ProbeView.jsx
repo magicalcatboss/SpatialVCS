@@ -14,6 +14,9 @@ export default function ProbeView() {
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
     const intervalRef = useRef(null);
+    const poseRef = useRef({ alpha: 0, beta: 0, gamma: 0 });
+    const inFlightRef = useRef(false);
+    const sendLogCounterRef = useRef(0);
 
     // Save API Key
     const handleSaveKey = (key) => {
@@ -23,8 +26,7 @@ export default function ProbeView() {
 
     // WebSocket — connect via SAME ORIGIN (Vite proxy handles forwarding to :8000)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Append API Key if exists
-    const socketUrl = `${protocol}//${window.location.host}/ws/probe/${scanId}${apiKey ? `?api_key=${apiKey}` : ''}`;
+    const socketUrl = `${protocol}//${window.location.host}/ws/probe/${scanId}`;
 
     const { sendMessage, lastMessage, readyState } = useWebSocket(socketUrl, {
         shouldReconnect: () => true,
@@ -40,6 +42,27 @@ export default function ProbeView() {
     const addLog = (msg) => {
         setLogs(prev => [msg, ...prev].slice(0, 20));
     };
+
+    useEffect(() => {
+        if (readyState === ReadyState.OPEN && apiKey) {
+            sendMessage(JSON.stringify({ type: 'auth', api_key: apiKey }));
+        }
+    }, [readyState, apiKey, sendMessage]);
+
+    useEffect(() => {
+        if (!lastMessage) return;
+        try {
+            const data = JSON.parse(lastMessage.data);
+            if (data?.type === 'ack' || data?.type === 'auth_ack' || data?.type === 'error') {
+                inFlightRef.current = false;
+            }
+            if (data?.type === 'error' && data?.message) {
+                addLog(`❌ ${data.message}`);
+            }
+        } catch (_) {
+            // ignore malformed server payloads
+        }
+    }, [lastMessage]);
 
     // Camera Logic
     useEffect(() => {
@@ -76,23 +99,35 @@ export default function ProbeView() {
     // Scanning Loop
     const captureAndSend = useCallback(() => {
         if (!videoRef.current || !canvasRef.current) return;
+        if (inFlightRef.current) return;
 
+        const video = videoRef.current;
         const canvas = canvasRef.current;
         const context = canvas.getContext('2d');
+        if (!context) return;
 
         // Match canvas to video dimensions
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 480;
+
+        // Force check: if dimensions are odd or zero, fallback
+        if (vw === 0 || vh === 0 || video.readyState < 2) return;
+
         canvas.width = vw;
         canvas.height = vh;
-
-        console.log("Video dimensions:", vw, vh); // Log video dimensions
 
         context.drawImage(video, 0, 0, vw, vh);
         const base64 = canvas.toDataURL('image/jpeg', 0.4);
 
         const currentPose = poseRef.current;
         if (readyState === ReadyState.OPEN) {
+            let nextFrame = 0;
+            setFramesSent(prev => {
+                nextFrame = prev + 1;
+                return nextFrame;
+            });
+            inFlightRef.current = true;
+
             sendMessage(JSON.stringify({
                 type: 'frame',
                 scan_id: scanId,
@@ -104,19 +139,27 @@ export default function ProbeView() {
                 },
                 image: base64
             }));
-            setFramesSent(prev => prev + 1);
-            addLog(`📤 Frame #${framesSent + 1} sent (${(base64.length / 1024).toFixed(0)}KB)`);
+            window.setTimeout(() => {
+                if (inFlightRef.current) {
+                    inFlightRef.current = false;
+                }
+            }, 4000);
+            sendLogCounterRef.current += 1;
+            if (sendLogCounterRef.current % 3 === 0) {
+                addLog(`📤 Frame #${nextFrame} sent (${(base64.length / 1024).toFixed(0)}KB)`);
+            }
         } else {
             addLog(`⏳ WS not open (state: ${readyState})`);
         }
-    }, [readyState, scanId, sendMessage]); // Removed framesSent
+    }, [readyState, scanId, sendMessage]);
 
     useEffect(() => {
         if (isScanning) {
-            intervalRef.current = setInterval(captureAndSend, 500); // Reduced interval to 500ms
+            intervalRef.current = setInterval(captureAndSend, 1500);
             addLog('🔴 Scan started');
         } else {
             clearInterval(intervalRef.current);
+            inFlightRef.current = false;
         }
         return () => clearInterval(intervalRef.current);
     }, [isScanning, captureAndSend]);
@@ -199,7 +242,7 @@ export default function ProbeView() {
             <main className="flex-1 relative flex flex-col overflow-hidden bg-black">
                 {/* Viewport */}
                 <div className="relative w-full h-3/5 bg-surface-darker overflow-hidden border-b-2 border-primary/30 crt-overlay group">
-                    <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover opacity-60 mix-blend-luminosity brightness-125 contrast-125" />
+                    <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-contain opacity-80 mix-blend-normal" />
                     <div className="absolute inset-0 bg-cyber-grid opacity-30"></div>
                     {isScanning && (
                         <div className="absolute w-full h-1 bg-primary/50 blur-[2px] shadow-[0_0_15px_rgba(0,240,255,0.8)] z-10 animate-scan-vertical"></div>

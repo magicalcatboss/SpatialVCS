@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 import os
 import json
+import datetime
 
 class GeminiClient:
     def __init__(self, api_key: str):
@@ -95,6 +96,32 @@ class GeminiClient:
         except Exception as e:
             return {"error": str(e)}
 
+    def describe_crop(self, crop_bytes: bytes, yolo_label: str):
+        """
+        Describe a single cropped object image. Uses YOLO label as hint.
+        Returns {"name": "...", "details": "..."} or {"error": "..."}.
+        """
+        try:
+            image_part = types.Part.from_bytes(data=crop_bytes, mime_type="image/jpeg")
+            response = self.client.models.generate_content(
+                model=self.flash_model,
+                contents=[
+                    f"This is a cropped image of an object detected as '{yolo_label}'. "
+                    "Describe it precisely in JSON format:\n"
+                    '{"name": "specific name with color/brand (e.g. red ceramic mug, silver MacBook Pro)", '
+                    '"details": "distinguishing features"}\n'
+                    "Return ONLY valid JSON, nothing else.",
+                    image_part
+                ]
+            )
+            clean_text = response.text.replace("```json", "").replace("```", "").strip()
+            try:
+                return json.loads(clean_text)
+            except json.JSONDecodeError:
+                return {"name": yolo_label, "details": response.text}
+        except Exception as e:
+            return {"name": yolo_label, "details": f"(error: {e})"}
+
     def answer_spatial_query(self, query: str, search_results: list):
         """
         SpatialVCS: Generate a natural language answer from search results.
@@ -106,6 +133,7 @@ class GeminiClient:
                 f"You are a helpful spatial memory assistant. The user scanned their space earlier "
                 f"and now asks a question. Based on the search results from the spatial memory database, "
                 f"give a clear, concise, and helpful answer.\n\n"
+                f"Current Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"User question: {query}\n\n"
                 f"Search results (ranked by relevance):\n{context}\n\n"
                 f"Answer naturally. Include the timestamp and position. "

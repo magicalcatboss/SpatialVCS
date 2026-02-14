@@ -13,3 +13,5 @@ frontend/dist/
 data/frames/
 data/memory/
 data/chroma/
+*.pt
+backend.log
