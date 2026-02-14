@@ -105,8 +105,10 @@ export default function DashboardView() {
                 },
                 body: JSON.stringify({
                     query,
+                    query,
                     top_k: 4,
-                    ...(activeScanId ? { scan_id: activeScanId } : {})
+                    // Search ALL scans by default (remove filter)
+                    // ...(activeScanId ? { scan_id: activeScanId } : {})
                 })
             });
 
