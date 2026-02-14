@@ -29,11 +29,11 @@ export default function ProbeView() {
     const { sendMessage, lastMessage, readyState } = useWebSocket(socketUrl, {
         shouldReconnect: () => true,
         reconnectInterval: 3000,
-        onOpen: () => addLog('✅ Connected to server!'),
-        onClose: () => addLog('❌ Disconnected'),
+        onOpen: () => addLog('🟢 Connected to server'),
+        onClose: () => addLog('🔴 Disconnected'),
         onError: (e) => {
             console.error('WS Error:', e);
-            addLog('⚠️ WebSocket Error (Check Key?)');
+            addLog('⚠️ Connection Error');
         },
     });
 
@@ -44,12 +44,13 @@ export default function ProbeView() {
     // Camera Logic
     useEffect(() => {
         const onOrientation = (event) => {
-            setPose({
+            const newPose = {
                 alpha: event.alpha ?? 0,
                 beta: event.beta ?? 0,
                 gamma: event.gamma ?? 0,
-                enabled: true,
-            });
+            };
+            setPose({ ...newPose, enabled: true });
+            poseRef.current = newPose;
         };
         window.addEventListener('deviceorientation', onOrientation, true);
         return () => window.removeEventListener('deviceorientation', onOrientation, true);
@@ -80,23 +81,26 @@ export default function ProbeView() {
         const context = canvas.getContext('2d');
 
         // Match canvas to video dimensions
-        const vw = videoRef.current.videoWidth || 640;
-        const vh = videoRef.current.videoHeight || 480;
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
         canvas.width = vw;
         canvas.height = vh;
 
-        context.drawImage(videoRef.current, 0, 0, vw, vh);
+        console.log("Video dimensions:", vw, vh); // Log video dimensions
+
+        context.drawImage(video, 0, 0, vw, vh);
         const base64 = canvas.toDataURL('image/jpeg', 0.4);
 
+        const currentPose = poseRef.current;
         if (readyState === ReadyState.OPEN) {
             sendMessage(JSON.stringify({
                 type: 'frame',
                 scan_id: scanId,
                 timestamp: Date.now() / 1000,
                 pose: {
-                    alpha: pose.alpha,
-                    beta: pose.beta,
-                    gamma: pose.gamma,
+                    alpha: currentPose.alpha,
+                    beta: currentPose.beta,
+                    gamma: currentPose.gamma,
                 },
                 image: base64
             }));
@@ -105,11 +109,11 @@ export default function ProbeView() {
         } else {
             addLog(`⏳ WS not open (state: ${readyState})`);
         }
-    }, [readyState, scanId, sendMessage, framesSent, pose.alpha, pose.beta, pose.gamma]);
+    }, [readyState, scanId, sendMessage]); // Removed framesSent
 
     useEffect(() => {
         if (isScanning) {
-            intervalRef.current = setInterval(captureAndSend, 1500);
+            intervalRef.current = setInterval(captureAndSend, 500); // Reduced interval to 500ms
             addLog('🔴 Scan started');
         } else {
             clearInterval(intervalRef.current);
@@ -129,7 +133,7 @@ export default function ProbeView() {
             }
         } else {
             if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                DeviceOrientationEvent.requestPermission().catch(() => {});
+                DeviceOrientationEvent.requestPermission().catch(() => { });
             }
             setIsScanning(true);
         }
