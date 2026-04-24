@@ -4,6 +4,8 @@ import uuid
 import os
 import json
 
+from app.config import get_settings
+
 # Lazy-load YOLO model to avoid crash if ultralytics/network unavailable
 _yolo_model = None
 
@@ -26,11 +28,7 @@ def _get_target_classes():
     Parse target class IDs from env. Example:
     SPATIAL_TARGET_CLASSES=0,24,26,28,39,41,56,57,58,59,60,62,63,64,65,66,67,73,74
     """
-    raw = os.getenv(
-        "SPATIAL_TARGET_CLASSES",
-        # Medium expansion for indoor demos: furniture + common desktop/handheld items.
-        "0,24,26,28,39,41,56,57,58,59,60,62,63,64,65,66,67,73,74"
-    )
+    raw = get_settings().target_classes
     ids = []
     for item in raw.split(","):
         item = item.strip()
@@ -100,10 +98,11 @@ def process_frame(
     
     # Stable demo default: constrained but configurable class whitelist.
     target_classes = _get_target_classes()
-    detect_conf = float(os.getenv("SPATIAL_DETECT_CONF", "0.35"))
-    max_det = int(os.getenv("SPATIAL_MAX_DETECTIONS", "30"))
-    imgsz = int(os.getenv("SPATIAL_MODEL_IMGSZ", "640"))
-    use_tracking = os.getenv("SPATIAL_USE_TRACKING", "1").strip().lower() not in {"0", "false", "no"}
+    settings = get_settings()
+    detect_conf = settings.detect_conf
+    max_det = settings.max_detections
+    imgsz = settings.model_imgsz
+    use_tracking = settings.use_tracking
 
     # Use TRACKING to get stable IDs (persist=True)
     # This aligns with the "Persistence Buffer" architecture.

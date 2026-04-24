@@ -8,7 +8,9 @@ opencv-python-headless>=4.9.0
 gTTS>=2.5.1
 numpy
 pydantic
+pydantic-settings
 python-dotenv
+pytest>=8.0
 
 # --- SpatialVCS (New) ---
 ultralytics>=8.0.0          # YOLOv8 object detection
