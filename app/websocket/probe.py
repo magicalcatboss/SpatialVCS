@@ -40,8 +40,8 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
 
             if data.get("type") == "stop_scan":
                 scan_id = data.get("scan_id", f"scan_{client_id}")
-                if scan_store.get(scan_id) is not None:
-                    scan_store.mark_completed(scan_id)
+                if await scan_store.get(scan_id) is not None:
+                    await scan_store.mark_completed(scan_id)
                 await socket_manager.broadcast_to_dashboards(
                     {
                         "type": "scan_completed",
@@ -130,12 +130,12 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 except Exception as exc:
                     print(f"Gemini crop error: {exc}")
 
-            scan_record = scan_store.ensure(scan_id, source=client_id)
-            scan_store.increment_frames(scan_id, frame_path or (detections[0].get("frame_path") if detections else None))
+            scan_record = await scan_store.ensure(scan_id, source=client_id)
+            await scan_store.increment_frames(scan_id, frame_path or (detections[0].get("frame_path") if detections else None))
             scan_record.updated_at = timestamp
 
             if detections:
-                scan_store.record_detections(scan_id, detections, timestamp)
+                await scan_store.record_detections(scan_id, detections, timestamp)
 
             stored_objects = []
             for obj in gemini_objects:
@@ -170,7 +170,7 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                 )
 
             if stored_objects:
-                scan_store.record_gemini_objects(scan_id, stored_objects, timestamp)
+                await scan_store.record_gemini_objects(scan_id, stored_objects, timestamp)
 
             broadcast_objects = []
             state_vector = {}
@@ -223,7 +223,7 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                     }
                 )
 
-            scan_store.update_gemini_cache(scan_id, gemini_label_cache)
+            await scan_store.update_gemini_cache(scan_id, gemini_label_cache)
 
             await socket_manager.broadcast_to_dashboards(
                 {

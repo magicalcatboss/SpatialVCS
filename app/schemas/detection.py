@@ -28,7 +28,7 @@ class DetectionRecord(BaseModel):
 
 class GeminiObject(BaseModel):
     name: str = ""
-    position: Position3D = Field(default_factory=Position3D)
+    position: Position3D | str = Field(default_factory=Position3D)
     details: str = ""
     bbox: Optional[BoundingBox] = None
     track_id: int = -1

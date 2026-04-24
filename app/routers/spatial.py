@@ -39,14 +39,14 @@ async def receive_frame(
 
     image_bytes = await image.read()
     detections = process_frame(image_bytes, center_depth, pose, scan_id)
-    scan_store.ensure(scan_id, source="rest")
-    scan_store.increment_frames(scan_id, detections[0].get("frame_path") if detections else None)
-    record = scan_store.get(scan_id)
+    await scan_store.ensure(scan_id, source="rest")
+    await scan_store.increment_frames(scan_id, detections[0].get("frame_path") if detections else None)
+    record = await scan_store.get(scan_id)
     if record is not None:
         record.updated_at = timestamp
 
     if detections:
-        scan_store.record_detections(scan_id, detections, timestamp)
+        await scan_store.record_detections(scan_id, detections, timestamp)
 
         description_data = client.describe_for_spatial(image_bytes)
         gemini_objects = description_data.get("objects", [])
@@ -73,7 +73,7 @@ async def receive_frame(
             )
 
         if stored_objects:
-            scan_store.record_gemini_objects(scan_id, stored_objects, timestamp)
+            await scan_store.record_gemini_objects(scan_id, stored_objects, timestamp)
 
     return {"status": "processed", "objects_found": len(detections)}
 
@@ -126,11 +126,11 @@ async def spatial_diff(
     scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None,
 ):
     for sid in [request.scan_id_before, request.scan_id_after]:
-        if scan_store.get(sid) is None:
+        if await scan_store.get(sid) is None:
             raise HTTPException(status_code=404, detail=f"Scan '{sid}' not found")
 
-    before_latest = scan_store.latest_by_label(request.scan_id_before)
-    after_latest = scan_store.latest_by_label(request.scan_id_after)
+    before_latest = await scan_store.latest_by_label(request.scan_id_before)
+    after_latest = await scan_store.latest_by_label(request.scan_id_after)
 
     before_labels = set(before_latest.keys())
     after_labels = set(after_latest.keys())
@@ -193,7 +193,7 @@ async def reset_spatial_data(
     socket_manager: Annotated[ConnectionManager, Depends(get_socket_manager)] = None,
 ):
     spatial_memory.reset_database()
-    scan_store.clear()
+    await scan_store.clear()
     await socket_manager.broadcast_to_dashboards(
         {
             "type": "system_reset",
@@ -204,13 +204,13 @@ async def reset_spatial_data(
 
 
 @router.get("/spatial/scans", response_model=ScansResponse)
-def list_scans(scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None):
-    return {"scans": scan_store.list_summaries()}
+async def list_scans(scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None):
+    return {"scans": await scan_store.list_summaries()}
 
 
 @router.get("/spatial/memory/{scan_id}", response_model=ScanMemoryResponse)
-def get_memory(scan_id: str, scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None):
-    record = scan_store.get(scan_id)
+async def get_memory(scan_id: str, scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None):
+    record = await scan_store.get(scan_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Scan '{scan_id}' not found")
     return record

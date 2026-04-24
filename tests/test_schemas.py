@@ -1,9 +1,12 @@
 import unittest
+import asyncio
 
 from pydantic import TypeAdapter
 
 from app.schemas.agent import ChatRequest
+from app.schemas.detection import GeminiObject
 from app.schemas.spatial import DiffEvent, SpatialQueryResponse
+from app.services.scan_store import InMemoryScanStore
 from app.schemas.ws_messages import ProbeInboundMessage
 
 
@@ -54,6 +57,31 @@ class SchemaContractTests(unittest.TestCase):
         )
         self.assertEqual(parsed.type, "frame")
         self.assertEqual(parsed.pose.alpha, 1)
+
+    def test_gemini_object_accepts_text_position_for_rest_path(self):
+        obj = GeminiObject(name="mug", position="left side of desk", details="red ceramic mug")
+        self.assertEqual(obj.position, "left side of desk")
+
+    def test_scan_store_records_rest_gemini_objects_with_text_position(self):
+        store = InMemoryScanStore()
+        asyncio.run(
+            store.record_gemini_objects(
+                "scan-rest",
+                [
+                    {
+                        "name": "mug",
+                        "position": "left side of desk",
+                        "details": "red ceramic mug",
+                        "timestamp": 123.0,
+                        "frame_path": "frame.jpg",
+                    }
+                ],
+                123.0,
+            )
+        )
+        record = asyncio.run(store.get("scan-rest"))
+        self.assertIsNotNone(record)
+        self.assertEqual(record.objects[0].position, "left side of desk")
 
 
 if __name__ == "__main__":

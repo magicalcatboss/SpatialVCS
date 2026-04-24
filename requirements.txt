@@ -11,6 +11,9 @@ pydantic
 pydantic-settings
 python-dotenv
 pytest>=8.0
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29
+alembic>=1.13
 
 # --- SpatialVCS (New) ---
 ultralytics>=8.0.0          # YOLOv8 object detection

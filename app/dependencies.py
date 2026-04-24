@@ -10,7 +10,7 @@ from services.spatial_memory import SpatialMemory
 
 _spatial_memory = SpatialMemory()
 _socket_manager = ConnectionManager()
-_scan_store: ScanStore = InMemoryScanStore()
+_scan_store: ScanStore | None = None
 
 
 def get_spatial_memory() -> SpatialMemory:
@@ -22,6 +22,16 @@ def get_socket_manager() -> ConnectionManager:
 
 
 def get_scan_store() -> ScanStore:
+    global _scan_store
+    if _scan_store is None:
+        settings = get_settings()
+        if settings.database_url:
+            from app.db.base import make_sessionmaker
+            from app.services.postgres_scan_store import PostgresScanStore
+
+            _scan_store = PostgresScanStore(make_sessionmaker(settings.database_url))
+        else:
+            _scan_store = InMemoryScanStore()
     return _scan_store
 
 

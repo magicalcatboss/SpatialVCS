@@ -1,6 +1,19 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16
+    container_name: spatialvcs-postgres
+    environment:
+      POSTGRES_DB: spatialvcs
+      POSTGRES_USER: spatial
+      POSTGRES_PASSWORD: spatial
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -15,6 +28,9 @@ services:
       - ./cert.pem:/app/cert.pem
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DATABASE_URL=postgresql+asyncpg://spatial:spatial@postgres:5432/spatialvcs
+    depends_on:
+      - postgres
     restart: unless-stopped
 
   frontend:
@@ -34,3 +50,6 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  pg_data:

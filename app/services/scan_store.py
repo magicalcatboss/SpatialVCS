@@ -6,16 +6,16 @@ from app.schemas.scan import ScanRecord, ScanSummary
 
 
 class ScanStore(Protocol):
-    def ensure(self, scan_id: str, source: Optional[str] = None) -> ScanRecord: ...
-    def get(self, scan_id: str) -> Optional[ScanRecord]: ...
-    def list_summaries(self) -> list[ScanSummary]: ...
-    def record_detections(self, scan_id: str, dets: list[dict], ts: float) -> None: ...
-    def record_gemini_objects(self, scan_id: str, objs: list[dict], ts: float) -> None: ...
-    def increment_frames(self, scan_id: str, frame_path: Optional[str]) -> None: ...
-    def mark_completed(self, scan_id: str) -> None: ...
-    def update_gemini_cache(self, scan_id: str, cache: dict) -> None: ...
-    def latest_by_label(self, scan_id: str) -> dict[str, dict]: ...
-    def clear(self) -> None: ...
+    async def ensure(self, scan_id: str, source: Optional[str] = None) -> ScanRecord: ...
+    async def get(self, scan_id: str) -> Optional[ScanRecord]: ...
+    async def list_summaries(self) -> list[ScanSummary]: ...
+    async def record_detections(self, scan_id: str, dets: list[dict], ts: float) -> None: ...
+    async def record_gemini_objects(self, scan_id: str, objs: list[dict], ts: float) -> None: ...
+    async def increment_frames(self, scan_id: str, frame_path: Optional[str]) -> None: ...
+    async def mark_completed(self, scan_id: str) -> None: ...
+    async def update_gemini_cache(self, scan_id: str, cache: dict) -> None: ...
+    async def latest_by_label(self, scan_id: str) -> dict[str, dict]: ...
+    async def clear(self) -> None: ...
 
 
 class InMemoryScanStore:
@@ -24,7 +24,7 @@ class InMemoryScanStore:
     def __init__(self):
         self._scans: dict[str, ScanRecord] = {}
 
-    def ensure(self, scan_id: str, source: Optional[str] = None) -> ScanRecord:
+    async def ensure(self, scan_id: str, source: Optional[str] = None) -> ScanRecord:
         if scan_id not in self._scans:
             self._scans[scan_id] = ScanRecord(scan_id=scan_id, source=source)
         record = self._scans[scan_id]
@@ -32,10 +32,10 @@ class InMemoryScanStore:
             record.source = source
         return record
 
-    def get(self, scan_id: str) -> Optional[ScanRecord]:
+    async def get(self, scan_id: str) -> Optional[ScanRecord]:
         return self._scans.get(scan_id)
 
-    def list_summaries(self) -> list[ScanSummary]:
+    async def list_summaries(self) -> list[ScanSummary]:
         return [
             ScanSummary(
                 scan_id=record.scan_id,
@@ -50,8 +50,8 @@ class InMemoryScanStore:
             for record in self._scans.values()
         ]
 
-    def record_detections(self, scan_id: str, dets: list[dict], ts: float) -> None:
-        record = self.ensure(scan_id)
+    async def record_detections(self, scan_id: str, dets: list[dict], ts: float) -> None:
+        record = await self.ensure(scan_id)
         for det in dets:
             record.detections.append(
                 DetectionRecord(
@@ -65,33 +65,33 @@ class InMemoryScanStore:
                 )
             )
 
-    def record_gemini_objects(self, scan_id: str, objs: list[dict], ts: float) -> None:
-        record = self.ensure(scan_id)
+    async def record_gemini_objects(self, scan_id: str, objs: list[dict], ts: float) -> None:
+        record = await self.ensure(scan_id)
         for obj in objs:
             payload = dict(obj)
             payload.setdefault("timestamp", ts)
             record.objects.append(GeminiObject(**payload))
         record.object_count += len(objs)
 
-    def increment_frames(self, scan_id: str, frame_path: Optional[str]) -> None:
-        record = self.ensure(scan_id)
+    async def increment_frames(self, scan_id: str, frame_path: Optional[str]) -> None:
+        record = await self.ensure(scan_id)
         record.frames += 1
         if frame_path:
             record.last_frame_path = frame_path
 
-    def mark_completed(self, scan_id: str) -> None:
-        record = self.ensure(scan_id)
+    async def mark_completed(self, scan_id: str) -> None:
+        record = await self.ensure(scan_id)
         record.status = "completed"
 
-    def update_gemini_cache(self, scan_id: str, cache: dict) -> None:
-        record = self.ensure(scan_id)
+    async def update_gemini_cache(self, scan_id: str, cache: dict) -> None:
+        record = await self.ensure(scan_id)
         record.gemini_label_cache = {
             key: value if isinstance(value, GeminiLabelCacheEntry) else GeminiLabelCacheEntry(**value)
             for key, value in cache.items()
         }
 
-    def latest_by_label(self, scan_id: str) -> dict[str, dict]:
-        record = self.get(scan_id)
+    async def latest_by_label(self, scan_id: str) -> dict[str, dict]:
+        record = await self.get(scan_id)
         if record is None:
             return {}
 
@@ -105,5 +105,5 @@ class InMemoryScanStore:
                 latest[label] = item
         return {label: item.model_dump() for label, item in latest.items()}
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         self._scans.clear()
