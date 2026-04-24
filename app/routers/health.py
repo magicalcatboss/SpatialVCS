@@ -2,10 +2,11 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from app.config import get_settings
 from app.dependencies import get_spatial_memory
+from app.services.metrics import metrics
 from services.video_processor import _get_yolo
 
 router = APIRouter()
@@ -41,3 +42,10 @@ def get_backend_capabilities():
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="backend_capabilities.md not found")
     return FileResponse(path, media_type="text/markdown")
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+def get_metrics():
+    if not get_settings().metrics_enabled:
+        raise HTTPException(status_code=404, detail="Metrics disabled")
+    return metrics.render_prometheus()

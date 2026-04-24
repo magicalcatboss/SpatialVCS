@@ -16,6 +16,7 @@ from app.schemas.spatial import (
     SpatialQueryResponse,
 )
 from app.services.pose import euclidean_distance
+from app.services.cross_scan_matching import build_cross_scan_matches
 from app.services.scan_store import ScanStore
 from services.llm import GeminiClient
 from services.socket_manager import ConnectionManager
@@ -100,6 +101,9 @@ async def spatial_query(
                 "description": r["description"],
                 "frame_url": frame_url,
                 "yolo_data": meta.get("yolo_detections", []),
+                "position": meta.get("position_3d"),
+                "yolo_label": meta.get("yolo_label", ""),
+                "track_id": int(meta.get("track_id", -1) or -1),
             }
         )
 
@@ -214,3 +218,16 @@ async def get_memory(scan_id: str, scan_store: Annotated[ScanStore, Depends(get_
     if record is None:
         raise HTTPException(status_code=404, detail=f"Scan '{scan_id}' not found")
     return record
+
+
+@router.get("/spatial/matches/{scan_id}")
+async def get_cross_scan_matches(scan_id: str, scan_store: Annotated[ScanStore, Depends(get_scan_store)] = None):
+    if not hasattr(scan_store, "list_spatial_objects"):
+        return {"scan_id": scan_id, "matches": [], "mode": "memory_store_no_pgvector"}
+    source_objects = await scan_store.list_spatial_objects(scan_id)
+    candidate_objects = await scan_store.list_spatial_objects(None)
+    return {
+        "scan_id": scan_id,
+        "matches": build_cross_scan_matches(source_objects, candidate_objects),
+        "mode": "structured_fallback",
+    }

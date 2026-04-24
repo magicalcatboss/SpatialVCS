@@ -11,7 +11,7 @@ from app.db.models.scan import ScanModel
 from app.db.models.spatial_object import SpatialObjectModel
 from app.schemas.detection import GeminiLabelCacheEntry
 from app.schemas.scan import ScanRecord, ScanSummary
-from app.services.pose import object_key_from_detection
+from app.services.pose import object_key_from_detection, object_key_from_gemini_object
 
 
 def _dt_to_timestamp(value: datetime | None) -> float | None:
@@ -86,7 +86,7 @@ class PostgresScanStore:
         seen_at = _timestamp_to_dt(ts)
         async with self._sessionmaker() as session:
             for det in dets:
-                object_key = object_key_from_detection(det)
+                object_key = det.get("object_key") or object_key_from_detection(det)
                 label = det.get("label", "object")
                 yolo_label = det.get("yolo_label", label)
                 values = {
@@ -150,7 +150,7 @@ class PostgresScanStore:
         seen_at = _timestamp_to_dt(ts)
         async with self._sessionmaker() as session:
             for obj in objs:
-                object_key = f"gemini_{obj.get('track_id', -1)}_{obj.get('name', 'object')}"
+                object_key = object_key_from_gemini_object(obj)
                 values = {
                     "scan_id": scan_id,
                     "object_key": object_key,
@@ -220,17 +220,11 @@ class PostgresScanStore:
                 await session.execute(
                     select(ObservationModel)
                     .where(ObservationModel.scan_id == scan_id)
-                    .order_by(ObservationModel.timestamp.asc())
+                    .where(ObservationModel.yolo_label.is_not(None))
+                    .distinct(ObservationModel.yolo_label)
+                    .order_by(ObservationModel.yolo_label, ObservationModel.timestamp.desc())
                 )
             ).scalars()
-            latest: dict[str, ObservationModel] = {}
-            for item in rows:
-                label = item.yolo_label
-                if not label:
-                    continue
-                prev = latest.get(label)
-                if prev is None or float(item.timestamp) > float(prev.timestamp):
-                    latest[label] = item
             return {
                 label: {
                     "label": item.yolo_label or "",
@@ -241,7 +235,8 @@ class PostgresScanStore:
                     "timestamp": item.timestamp,
                     "frame_path": item.frame_path or "",
                 }
-                for label, item in latest.items()
+                for item in rows
+                if (label := item.yolo_label)
             }
 
     async def clear(self) -> None:
@@ -249,6 +244,26 @@ class PostgresScanStore:
             await session.execute(delete(ScanModel))
             await session.commit()
         self._gemini_caches.clear()
+
+    async def list_spatial_objects(self, scan_id: str | None = None) -> list[dict]:
+        async with self._sessionmaker() as session:
+            stmt = select(SpatialObjectModel)
+            if scan_id:
+                stmt = stmt.where(SpatialObjectModel.scan_id == scan_id)
+            rows = (await session.execute(stmt)).scalars()
+            return [
+                {
+                    "scan_id": row.scan_id,
+                    "object_key": row.object_key,
+                    "canonical_label": row.canonical_label,
+                    "yolo_label": row.yolo_label,
+                    "gemini_name": row.gemini_name,
+                    "confidence": float(row.confidence or 0.0),
+                    "last_position": row.last_position or {},
+                    "last_bbox": row.last_bbox,
+                }
+                for row in rows
+            ]
 
     async def _record_from_scan(self, scan: ScanModel, include_children: bool = False) -> ScanRecord:
         objects = []

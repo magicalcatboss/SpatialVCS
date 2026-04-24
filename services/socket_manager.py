@@ -2,6 +2,8 @@ from fastapi import WebSocket
 from typing import List, Dict
 import json
 
+from app.services.metrics import metrics
+
 class ConnectionManager:
     """
     Manages WebSocket connections for SpatialVCS.
@@ -15,21 +17,25 @@ class ConnectionManager:
     async def connect_probe(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
         self.probes[client_id] = websocket
+        metrics.set_gauge("spatialvcs_ws_probes", len(self.probes))
         print(f"📱 Probe connected: {client_id}")
 
     async def connect_dashboard(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
         self.dashboards[client_id] = websocket
+        metrics.set_gauge("spatialvcs_ws_dashboards", len(self.dashboards))
         print(f"💻 Dashboard connected: {client_id}")
 
     def disconnect_probe(self, client_id: str):
         if client_id in self.probes:
             del self.probes[client_id]
+            metrics.set_gauge("spatialvcs_ws_probes", len(self.probes))
             print(f"📱 Probe disconnected: {client_id}")
 
     def disconnect_dashboard(self, client_id: str):
         if client_id in self.dashboards:
             del self.dashboards[client_id]
+            metrics.set_gauge("spatialvcs_ws_dashboards", len(self.dashboards))
             print(f"💻 Dashboard disconnected: {client_id}")
 
     async def broadcast_to_dashboards(self, message: dict):

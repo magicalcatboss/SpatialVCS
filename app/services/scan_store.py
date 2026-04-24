@@ -55,6 +55,7 @@ class InMemoryScanStore:
         for det in dets:
             record.detections.append(
                 DetectionRecord(
+                    object_key=det.get("object_key", ""),
                     label=det.get("label", ""),
                     yolo_label=det.get("yolo_label", det.get("label", "")),
                     gemini_name=det.get("gemini_name", ""),

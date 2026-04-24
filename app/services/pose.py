@@ -20,6 +20,19 @@ def object_key_from_detection(det: dict) -> str:
     return f"{label}_cell_{cell_x}_{cell_y}_{z_bucket}"
 
 
+def object_key_from_gemini_object(obj: dict) -> str:
+    if obj.get("object_key"):
+        return str(obj["object_key"])
+    position = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+    det = {
+        "label": obj.get("yolo_label") or obj.get("name") or "object",
+        "track_id": int(obj.get("track_id", -1)),
+        "bbox": obj.get("bbox") or [0, 0, 0, 0],
+        "position_3d": position,
+    }
+    return object_key_from_detection(det)
+
+
 def rotation_matrix_from_orientation(alpha: float, beta: float, gamma: float):
     """
     Convert device orientation angles (degrees) to a 3x3 rotation matrix.

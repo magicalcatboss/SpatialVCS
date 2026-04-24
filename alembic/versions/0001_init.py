@@ -53,6 +53,21 @@ def upgrade() -> None:
         sa.UniqueConstraint("scan_id", "object_key", name="idx_obj_scan_key"),
     )
     op.create_index("idx_obj_scan", "spatial_objects", ["scan_id"])
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            CREATE EXTENSION IF NOT EXISTS vector;
+            ALTER TABLE spatial_objects ADD COLUMN IF NOT EXISTS similarity_embedding vector(384);
+            CREATE INDEX IF NOT EXISTS idx_obj_similarity_embedding
+                ON spatial_objects USING ivfflat (similarity_embedding vector_cosine_ops);
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE NOTICE 'pgvector unavailable; skipping vector support: %', SQLERRM;
+        END
+        $$;
+        """
+    )
 
     op.create_table(
         "observations",
@@ -77,6 +92,7 @@ def downgrade() -> None:
     op.drop_index("idx_obs_obj", table_name="observations")
     op.drop_index("idx_obs_scan_ts", table_name="observations")
     op.drop_table("observations")
+    op.execute("DROP INDEX IF EXISTS idx_obj_similarity_embedding")
     op.drop_index("idx_obj_scan", table_name="spatial_objects")
     op.drop_table("spatial_objects")
     op.drop_index("idx_scans_status", table_name="scans")

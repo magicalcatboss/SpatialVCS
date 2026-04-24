@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.logging import configure_logging
+from app.dependencies import init_background_services, shutdown_background_services
 from app.routers import agent, audio, health, spatial, vision
 from app.websocket import dashboard, probe
 
@@ -31,6 +32,14 @@ def create_app() -> FastAPI:
 
     for router_module in (health, vision, audio, agent, spatial, probe, dashboard):
         app.include_router(router_module.router)
+
+    @app.on_event("startup")
+    async def startup_background_services():
+        init_background_services()
+
+    @app.on_event("shutdown")
+    async def shutdown_background_workers():
+        await shutdown_background_services()
 
     if os.path.exists("demo"):
         app.mount("/demo", StaticFiles(directory="demo", html=True), name="demo")

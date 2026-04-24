@@ -1,17 +1,44 @@
-import asyncio
 import base64
+import logging
 import time
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
-from app.dependencies import get_optional_gemini, get_scan_store, get_socket_manager, get_spatial_memory
-from app.services.pose import object_key_from_detection, pose_matrix_str_from_orientation
+from app.dependencies import (
+    get_depth_estimator,
+    get_identity_resolver,
+    get_label_fusion,
+    get_optional_gemini,
+    get_scan_store,
+    get_socket_manager,
+    get_spatial_memory,
+)
+from app.services.gemini_queue import GeminiDescribeJob, get_gemini_queue
+from app.services.metrics import metrics
+from app.services.pose import pose_matrix_str_from_orientation
 from services.llm import GeminiClient
 from services.video_processor import crop_detections, process_frame
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _model_cache_to_dict(cache: dict) -> dict:
+    return {
+        key: value.model_dump() if hasattr(value, "model_dump") else dict(value)
+        for key, value in cache.items()
+    }
+
+
+def _is_fresh_gemini_cache(entry: dict | None, timestamp: float, ttl_sec: float) -> bool:
+    if not entry:
+        return False
+    try:
+        return float(timestamp) - float(entry.get("updated_at", 0.0)) <= ttl_sec
+    except (TypeError, ValueError):
+        return False
 
 
 @router.websocket("/ws/probe/{client_id}")
@@ -20,6 +47,10 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
     scan_store = get_scan_store()
     socket_manager = get_socket_manager()
     spatial_memory = get_spatial_memory()
+    identity_resolver = get_identity_resolver()
+    label_fusion = get_label_fusion()
+    depth_estimator = get_depth_estimator()
+    gemini_queue = get_gemini_queue()
 
     await socket_manager.connect_probe(websocket, client_id)
 
@@ -64,6 +95,8 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
             scan_id = data.get("scan_id", f"scan_{client_id}")
             timestamp = data.get("timestamp", time.time())
             frame_count += 1
+            metrics.inc("spatialvcs_frames_received")
+            logger.info("frame_received source=%s scan_id=%s frame=%s", client_id, scan_id, frame_count)
 
             image_b64 = data.get("image", "")
             if "," in image_b64:
@@ -82,126 +115,99 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
             beta = float(pose_data.get("beta", 0) or 0)
             gamma = float(pose_data.get("gamma", 0) or 0)
             pose_str = pose_matrix_str_from_orientation(alpha, beta, gamma)
-            estimated_depth = 1.5
+            estimated_depth = depth_estimator.estimate(data)
 
             detections = []
             frame_path = ""
             should_run_yolo = frame_count % settings.yolo_frame_stride == 1
-            if should_run_yolo:
-                detections, frame_path = process_frame(
-                    image_bytes, estimated_depth, pose_str, scan_id, return_frame_path=True
-                )
-            else:
-                _, frame_path = process_frame(
-                    image_bytes,
-                    estimated_depth,
-                    pose_str,
-                    scan_id,
-                    run_detection=False,
-                    return_frame_path=True,
-                )
+            with metrics.time_block("spatialvcs_frame_processing_seconds"):
+                if should_run_yolo:
+                    detections, frame_path = process_frame(
+                        image_bytes, estimated_depth, pose_str, scan_id, return_frame_path=True
+                    )
+                    metrics.inc("spatialvcs_yolo_frames")
+                    metrics.inc("spatialvcs_yolo_detections", len(detections))
+                    logger.info("yolo_processed source=%s scan_id=%s frame=%s detections=%s", client_id, scan_id, frame_count, len(detections))
+                else:
+                    _, frame_path = process_frame(
+                        image_bytes,
+                        estimated_depth,
+                        pose_str,
+                        scan_id,
+                        run_detection=False,
+                        return_frame_path=True,
+                    )
 
             gemini_objects = []
             run_gemini = gemini and (frame_count % settings.gemini_frame_stride == 1)
-            if run_gemini and detections:
-                try:
-                    crops = crop_detections(image_bytes, detections)
-                    pairs = [(c, d) for c, d in zip(crops, detections) if c is not None]
-                    pairs = pairs[: settings.max_gemini_crops]
 
-                    async def describe_crop(crop, det):
-                        desc = await asyncio.to_thread(gemini.describe_crop, crop, det["label"])
-                        return desc, det
-
-                    results = await asyncio.gather(*[describe_crop(c, d) for c, d in pairs])
-                    for desc, det in results:
-                        gemini_obj = {
-                            "name": desc.get("name", det["label"]),
-                            "position": det.get("position_3d", {}),
-                            "details": desc.get("details", ""),
-                            "bbox": det.get("bbox"),
-                            "track_id": det.get("track_id", -1),
-                            "yolo_label": det["label"],
-                            "confidence": det["confidence"],
-                        }
-                        gemini_objects.append(gemini_obj)
-                        det["gemini_name"] = gemini_obj["name"]
-                        det["gemini_details"] = gemini_obj["details"]
-                except Exception as exc:
-                    print(f"Gemini crop error: {exc}")
+            for det in detections:
+                obj_key = identity_resolver.resolve(scan_id, det, float(timestamp))
+                det["object_key"] = obj_key
+                logger.info("identity_matched scan_id=%s object_key=%s label=%s", scan_id, obj_key, det.get("label", ""))
 
             scan_record = await scan_store.ensure(scan_id, source=client_id)
             await scan_store.increment_frames(scan_id, frame_path or (detections[0].get("frame_path") if detections else None))
             scan_record.updated_at = timestamp
+            gemini_label_cache = _model_cache_to_dict(scan_record.gemini_label_cache)
 
             if detections:
-                await scan_store.record_detections(scan_id, detections, timestamp)
-
-            stored_objects = []
-            for obj in gemini_objects:
-                meta = {
-                    "scan_id": scan_id,
-                    "frame_path": frame_path or (detections[0]["frame_path"] if detections else ""),
-                    "timestamp": timestamp,
-                    "bbox": obj.get("bbox"),
-                    "track_id": obj.get("track_id", -1),
-                    "yolo_label": obj.get("yolo_label", ""),
-                    "confidence": obj.get("confidence", 0),
-                    "position_3d": obj.get("position"),
-                    "source": client_id,
-                }
-                text_to_index = f"{obj.get('name', '')} {obj.get('details', '')}"
                 try:
-                    spatial_memory.add_observation(text_to_index, meta)
+                    await scan_store.record_detections(scan_id, detections, timestamp)
                 except Exception as exc:
-                    print(f"Spatial memory add failed: {exc}")
-                stored_objects.append(
-                    {
-                        "name": obj.get("name", ""),
-                        "position": obj.get("position", {}),
-                        "details": obj.get("details", ""),
-                        "timestamp": timestamp,
-                        "frame_path": meta["frame_path"],
-                        "bbox": obj.get("bbox"),
-                        "track_id": obj.get("track_id", -1),
-                        "yolo_label": obj.get("yolo_label", ""),
-                        "confidence": obj.get("confidence", 0),
-                    }
-                )
+                    metrics.inc("spatialvcs_db_write_errors")
+                    logger.warning("db_write_failed scan_id=%s error=%s", scan_id, exc)
 
-            if stored_objects:
-                await scan_store.record_gemini_objects(scan_id, stored_objects, timestamp)
+            if run_gemini and detections:
+                try:
+                    crops = crop_detections(image_bytes, detections)
+                    pairs = [(c, d) for c, d in zip(crops, detections) if c is not None]
+                    for crop, det in pairs[: settings.max_gemini_crops]:
+                        if _is_fresh_gemini_cache(
+                            gemini_label_cache.get(det["object_key"]),
+                            float(timestamp),
+                            settings.gemini_label_ttl_sec,
+                        ):
+                            metrics.inc("spatialvcs_gemini_cache_hits")
+                            logger.info("gemini_job_cache_hit scan_id=%s object_key=%s", scan_id, det["object_key"])
+                            continue
+                        enqueued = gemini_queue.enqueue(
+                            GeminiDescribeJob(
+                                scan_id=scan_id,
+                                object_key=det["object_key"],
+                                crop_bytes=crop,
+                                detection=dict(det),
+                                frame_path=frame_path or det.get("frame_path", ""),
+                                timestamp=float(timestamp),
+                                source=client_id,
+                                gemini=gemini,
+                                scan_store=scan_store,
+                                spatial_memory=spatial_memory,
+                            )
+                        )
+                        logger.info("gemini_job_%s scan_id=%s object_key=%s", "queued" if enqueued else "skipped", scan_id, det["object_key"])
+                except Exception as exc:
+                    metrics.inc("spatialvcs_gemini_jobs_failed")
+                    logger.warning("gemini_queue_failed scan_id=%s error=%s", scan_id, exc)
 
             broadcast_objects = []
             state_vector = {}
-            gemini_label_cache = {
-                key: value.model_dump() if hasattr(value, "model_dump") else dict(value)
-                for key, value in scan_record.gemini_label_cache.items()
-            }
 
             for det in detections:
                 tid = det.get("track_id", -1)
-                label = det["label"]
-                obj_key = object_key_from_detection(det)
-
-                if det.get("gemini_name"):
-                    gemini_label_cache[obj_key] = {
-                        "name": det.get("gemini_name", label),
-                        "details": det.get("gemini_details", ""),
-                        "updated_at": float(timestamp),
-                    }
+                obj_key = det.get("object_key") or identity_resolver.resolve(scan_id, det, float(timestamp))
 
                 cached = gemini_label_cache.get(obj_key)
-                if cached and (float(timestamp) - float(cached.get("updated_at", 0.0)) <= settings.gemini_label_ttl_sec):
-                    display_label = cached.get("name", label)
-                    display_details = cached.get("details", det.get("gemini_details", ""))
-                else:
-                    display_label = det.get("gemini_name", label)
+                fused = label_fusion.fuse(det, cached, float(timestamp), settings.gemini_label_ttl_sec)
+                display_label = fused.display_label
+                display_details = fused.details
+                if cached and fused.label_source != "gemini_cache":
                     display_details = det.get("gemini_details", "")
                     if cached:
                         gemini_label_cache.pop(obj_key, None)
 
                 state_vector[obj_key] = {
+                    "object_key": obj_key,
                     "x": det.get("position_3d", {}).get("x", 0),
                     "y": det.get("position_3d", {}).get("y", 0),
                     "z": det.get("position_3d", {}).get("z", 0),
@@ -209,14 +215,21 @@ async def websocket_probe(websocket: WebSocket, client_id: str, api_key: Optiona
                     "track_id": tid,
                     "label": display_label,
                     "yolo_label": det["label"],
+                    "canonical_label": fused.canonical_label,
+                    "label_confidence": fused.label_confidence,
+                    "label_source": fused.label_source,
                 }
 
                 broadcast_objects.append(
                     {
+                        "object_key": obj_key,
                         "label": display_label,
                         "yolo_label": det["label"],
+                        "canonical_label": fused.canonical_label,
                         "details": display_details,
                         "confidence": det["confidence"],
+                        "label_confidence": fused.label_confidence,
+                        "label_source": fused.label_source,
                         "track_id": tid,
                         "bbox": det.get("bbox"),
                         "position": det.get("position_3d", {"x": 0, "y": 0, "z": estimated_depth}),

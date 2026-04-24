@@ -6,7 +6,13 @@ from pydantic import TypeAdapter
 from app.schemas.agent import ChatRequest
 from app.schemas.detection import GeminiObject
 from app.schemas.spatial import DiffEvent, SpatialQueryResponse
+from app.services.cross_scan_matching import build_cross_scan_matches
+from app.services.depth import DepthEstimator
+from app.services.gemini_queue import GeminiDescribeJob, GeminiDescribeQueue
+from app.services.identity import ObjectIdentityResolver
+from app.services.label_fusion import LabelFusion
 from app.services.scan_store import InMemoryScanStore
+from app.services.pose import object_key_from_gemini_object
 from app.schemas.ws_messages import ProbeInboundMessage
 
 
@@ -31,7 +37,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(set(response.keys()), {"query", "answer", "results"})
         self.assertEqual(
             set(response["results"][0].keys()),
-            {"score", "description", "frame_url", "yolo_data"},
+            {"score", "description", "frame_url", "yolo_data", "position", "yolo_label", "track_id"},
         )
 
     def test_diff_event_preserves_from_alias(self):
@@ -82,6 +88,94 @@ class SchemaContractTests(unittest.TestCase):
         record = asyncio.run(store.get("scan-rest"))
         self.assertIsNotNone(record)
         self.assertEqual(record.objects[0].position, "left side of desk")
+
+    def test_gemini_object_key_uses_detection_key_rules(self):
+        key = object_key_from_gemini_object(
+            {
+                "name": "red mug",
+                "yolo_label": "cup",
+                "track_id": 7,
+                "bbox": [10, 20, 30, 40],
+                "position": {"x": 0.1, "y": 0.2, "z": -1.2},
+            }
+        )
+        self.assertEqual(key, "cup_7")
+
+    def test_depth_estimator_prefers_payload_depth(self):
+        estimator = DepthEstimator(default_depth_m=1.5)
+        self.assertEqual(estimator.estimate({"center_depth": 2.25}), 2.25)
+        self.assertEqual(estimator.estimate({}), 1.5)
+
+    def test_identity_resolver_prefers_track_id(self):
+        resolver = ObjectIdentityResolver(match_distance_m=0.6, stale_sec=3.0)
+        key = resolver.resolve(
+            "scan",
+            {"label": "cup", "track_id": 3, "bbox": [1, 2, 3, 4], "position_3d": {"x": 0, "y": 0, "z": 0}},
+            10.0,
+        )
+        self.assertEqual(key, "cup_3")
+
+    def test_identity_resolver_matches_nearby_untracked_object(self):
+        resolver = ObjectIdentityResolver(match_distance_m=0.6, stale_sec=3.0)
+        first = resolver.resolve(
+            "scan",
+            {"label": "cup", "track_id": -1, "bbox": [0, 0, 20, 20], "position_3d": {"x": 0, "y": 0, "z": 0}},
+            10.0,
+        )
+        second = resolver.resolve(
+            "scan",
+            {"label": "cup", "track_id": -1, "bbox": [40, 40, 60, 60], "position_3d": {"x": 0.1, "y": 0, "z": 0.1}},
+            11.0,
+        )
+        self.assertEqual(first, second)
+
+    def test_label_fusion_prefers_fresh_gemini_cache(self):
+        result = LabelFusion().fuse(
+            {"label": "cup", "confidence": 0.4},
+            {"name": "red mug", "details": "ceramic", "updated_at": 10.0},
+            12.0,
+            20.0,
+        )
+        self.assertEqual(result.display_label, "red mug")
+        self.assertEqual(result.label_source, "gemini_cache")
+
+    def test_gemini_queue_dedupes_and_drops_when_full(self):
+        queue = GeminiDescribeQueue(max_size=1, concurrency=1, timeout_sec=1)
+        job = GeminiDescribeJob(
+            scan_id="scan",
+            object_key="cup_1",
+            crop_bytes=b"crop",
+            detection={"label": "cup"},
+            frame_path="frame.jpg",
+            timestamp=1.0,
+            source="probe",
+            gemini=object(),
+            scan_store=object(),
+            spatial_memory=object(),
+        )
+        other = GeminiDescribeJob(
+            scan_id="scan",
+            object_key="cup_2",
+            crop_bytes=b"other",
+            detection={"label": "cup"},
+            frame_path="frame.jpg",
+            timestamp=1.0,
+            source="probe",
+            gemini=object(),
+            scan_store=object(),
+            spatial_memory=object(),
+        )
+        self.assertTrue(queue.enqueue(job))
+        self.assertFalse(queue.enqueue(job))
+        self.assertFalse(queue.enqueue(other))
+
+    def test_cross_scan_match_scores_same_label_nearby_candidate(self):
+        matches = build_cross_scan_matches(
+            [{"scan_id": "a", "object_key": "cup_1", "canonical_label": "cup", "last_position": {"x": 0, "y": 0, "z": 0}}],
+            [{"scan_id": "b", "object_key": "cup_2", "canonical_label": "cup", "last_position": {"x": 0.1, "y": 0, "z": 0}}],
+        )
+        self.assertEqual(matches[0]["candidate_object_key"], "cup_2")
+        self.assertGreater(matches[0]["similarity_score"], 0.9)
 
 
 if __name__ == "__main__":

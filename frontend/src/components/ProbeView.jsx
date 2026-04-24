@@ -3,7 +3,7 @@ import useWebSocket, { ReadyState } from 'react-use-websocket';
 import { Camera, Radio, Wifi, Settings, History, User } from 'lucide-react';
 
 export default function ProbeView() {
-    const [scanId] = useState(`SCN-${Math.floor(Math.random() * 10000)}`);
+    const [scanId] = useState(() => `SCN-${Math.floor(Math.random() * 10000)}`);
     const [isScanning, setIsScanning] = useState(false);
     const [logs, setLogs] = useState([]);
     const [framesSent, setFramesSent] = useState(0);
@@ -17,6 +17,10 @@ export default function ProbeView() {
     const poseRef = useRef({ alpha: 0, beta: 0, gamma: 0 });
     const inFlightRef = useRef(false);
     const sendLogCounterRef = useRef(0);
+
+    const addLog = useCallback((msg) => {
+        setLogs(prev => [msg, ...prev].slice(0, 20));
+    }, []);
 
     // Save API Key
     const handleSaveKey = (key) => {
@@ -39,10 +43,6 @@ export default function ProbeView() {
         },
     });
 
-    const addLog = (msg) => {
-        setLogs(prev => [msg, ...prev].slice(0, 20));
-    };
-
     useEffect(() => {
         if (readyState === ReadyState.OPEN && apiKey) {
             sendMessage(JSON.stringify({ type: 'auth', api_key: apiKey }));
@@ -57,12 +57,12 @@ export default function ProbeView() {
                 inFlightRef.current = false;
             }
             if (data?.type === 'error' && data?.message) {
-                addLog(`❌ ${data.message}`);
+                window.setTimeout(() => addLog(`❌ ${data.message}`), 0);
             }
-        } catch (_) {
+        } catch {
             // ignore malformed server payloads
         }
-    }, [lastMessage]);
+    }, [lastMessage, addLog]);
 
     // Camera Logic
     useEffect(() => {
@@ -94,7 +94,7 @@ export default function ProbeView() {
             }
         }
         startCamera();
-    }, []);
+    }, [addLog]);
 
     // Scanning Loop
     const captureAndSend = useCallback(() => {
@@ -151,18 +151,18 @@ export default function ProbeView() {
         } else {
             addLog(`⏳ WS not open (state: ${readyState})`);
         }
-    }, [readyState, scanId, sendMessage]);
+    }, [readyState, scanId, sendMessage, addLog]);
 
     useEffect(() => {
         if (isScanning) {
             intervalRef.current = setInterval(captureAndSend, 1500);
-            addLog('🔴 Scan started');
+            window.setTimeout(() => addLog('🔴 Scan started'), 0);
         } else {
             clearInterval(intervalRef.current);
             inFlightRef.current = false;
         }
         return () => clearInterval(intervalRef.current);
-    }, [isScanning, captureAndSend]);
+    }, [isScanning, captureAndSend, addLog]);
 
     const toggleScan = () => {
         if (isScanning) {

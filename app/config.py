@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     max_gemini_crops: int = Field(default=3, validation_alias="SPATIAL_MAX_GEMINI_CROPS")
     fallback_key_bucket_px: int = Field(default=96, validation_alias="SPATIAL_FALLBACK_KEY_BUCKET_PX")
     gemini_label_ttl_sec: float = Field(default=20.0, validation_alias="SPATIAL_GEMINI_LABEL_TTL_SEC")
+    gemini_queue_max_size: int = Field(default=128, validation_alias="SPATIAL_GEMINI_QUEUE_MAX_SIZE")
+    gemini_queue_concurrency: int = Field(default=2, validation_alias="SPATIAL_GEMINI_QUEUE_CONCURRENCY")
+    gemini_job_timeout_sec: float = Field(default=10.0, validation_alias="SPATIAL_GEMINI_JOB_TIMEOUT_SEC")
+    id_match_distance_m: float = Field(default=0.6, validation_alias="SPATIAL_ID_MATCH_DISTANCE_M")
+    id_stale_sec: float = Field(default=3.0, validation_alias="SPATIAL_ID_STALE_SEC")
+    metrics_enabled: bool = Field(default=True, validation_alias="SPATIAL_METRICS_ENABLED")
+    default_depth_m: float = Field(default=1.5, validation_alias="SPATIAL_DEFAULT_DEPTH_M")
     detect_conf: float = Field(default=0.35, validation_alias="SPATIAL_DETECT_CONF")
     max_detections: int = Field(default=30, validation_alias="SPATIAL_MAX_DETECTIONS")
     model_imgsz: int = Field(default=640, validation_alias="SPATIAL_MODEL_IMGSZ")
@@ -49,6 +56,13 @@ class Settings(BaseSettings):
             "max_gemini_crops": int(os.getenv("SPATIAL_MAX_GEMINI_CROPS", "3")),
             "fallback_key_bucket_px": int(os.getenv("SPATIAL_FALLBACK_KEY_BUCKET_PX", "96")),
             "gemini_label_ttl_sec": float(os.getenv("SPATIAL_GEMINI_LABEL_TTL_SEC", "20")),
+            "gemini_queue_max_size": int(os.getenv("SPATIAL_GEMINI_QUEUE_MAX_SIZE", "128")),
+            "gemini_queue_concurrency": int(os.getenv("SPATIAL_GEMINI_QUEUE_CONCURRENCY", "2")),
+            "gemini_job_timeout_sec": float(os.getenv("SPATIAL_GEMINI_JOB_TIMEOUT_SEC", "10")),
+            "id_match_distance_m": float(os.getenv("SPATIAL_ID_MATCH_DISTANCE_M", "0.6")),
+            "id_stale_sec": float(os.getenv("SPATIAL_ID_STALE_SEC", "3.0")),
+            "metrics_enabled": os.getenv("SPATIAL_METRICS_ENABLED", "true").strip().lower() not in {"0", "false", "no"},
+            "default_depth_m": float(os.getenv("SPATIAL_DEFAULT_DEPTH_M", "1.5")),
             "detect_conf": float(os.getenv("SPATIAL_DETECT_CONF", "0.35")),
             "max_detections": int(os.getenv("SPATIAL_MAX_DETECTIONS", "30")),
             "model_imgsz": int(os.getenv("SPATIAL_MODEL_IMGSZ", "640")),

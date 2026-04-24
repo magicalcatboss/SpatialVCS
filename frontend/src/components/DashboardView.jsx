@@ -1,197 +1,59 @@
-import React, { useState, useEffect, useRef } from 'react';
-import useWebSocket, { ReadyState } from 'react-use-websocket';
+import React, { useState, useEffect } from 'react';
+import { ReadyState } from 'react-use-websocket';
 import { Search, Database, Box, Play, Wifi, Cpu, Activity, Clock, Settings, RefreshCw, Trash2, Mic, Volume2 } from 'lucide-react';
 import SpatialView3D from './SpatialView3D';
+import { useApiKey } from '../hooks/useApiKey';
+import { useDashboardSocket } from '../hooks/useDashboardSocket';
+import { useScans } from '../hooks/useScans';
+import { useSpatialDiff } from '../hooks/useSpatialDiff';
+import { useSpatialQuery } from '../hooks/useSpatialQuery';
+import { useVoiceSearch } from '../hooks/useVoiceSearch';
+
+const stringToColor = (str) => {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+    return '#' + '00000'.substring(0, 6 - c.length) + c;
+};
 
 export default function DashboardView() {
-    const [query, setQuery] = useState('');
-    const [searchResults, setSearchResults] = useState([]);
-    const [liveDetections, setLiveDetections] = useState([]);
     const [spatialSnapshot, setSpatialSnapshot] = useState([]);
     const [show3D, setShow3D] = useState(false);
-    const [stats, setStats] = useState({ frames: 0, objects: 0, fps: 0 });
-    const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
     const [showSettings, setShowSettings] = useState(false);
-    const [activeScanId, setActiveScanId] = useState('');
-    const [scanList, setScanList] = useState([]);
-    const [beforeScanId, setBeforeScanId] = useState('');
-    const [afterScanId, setAfterScanId] = useState('');
     const [diffThreshold, setDiffThreshold] = useState(0.5);
     const [diffResult, setDiffResult] = useState(null);
-    const [diffLoading, setDiffLoading] = useState(false);
-    const [isLiveDiff, setIsLiveDiff] = useState(false);
-    const [referenceObjects, setReferenceObjects] = useState({});
-    const [trajectories, setTrajectories] = useState({});
-    const [lastSeen, setLastSeen] = useState({});
-
-    // Persistence Buffer: Map<Key, {object, lastSeenTime}>
-    const persistenceMap = useRef(new Map());
-    const trajectoriesRef = useRef({});
-    const lastSeenRef = useRef({});
-
-    // Save API Key
-    const handleSaveKey = (key) => {
-        setApiKey(key);
-        localStorage.setItem('gemini_api_key', key);
-    };
-
-    // WebSocket - Use same origin (Vite proxy)
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socketUrl = `${protocol}//${window.location.host}/ws/dashboard/dashboard_Main`;
-
-    const { lastMessage, readyState } = useWebSocket(socketUrl, {
-        shouldReconnect: () => true,
-        onOpen: () => console.log('Dashboard Connected'),
+    const [motionNow, setMotionNow] = useState(() => Date.now());
+    const { apiKey, handleSaveKey } = useApiKey();
+    const { afterScanId, beforeScanId, fetchScans, scanList, setAfterScanId, setBeforeScanId } = useScans();
+    const { diffLoading, handleRunDiff, isLiveDiff, referenceObjects, toggleLiveDiff } = useSpatialDiff({
+        apiKey,
+        beforeScanId,
+        afterScanId,
+        diffThreshold,
+        setDiffResult,
     });
-
-    // Helper: Calculate Euclidean Distance
-    const getDistance = (p1, p2) => {
-        const x = (p1.x || 0) - (p2.x || 0);
-        const y = (p1.y || 0) - (p2.y || 0);
-        const z = (p1.z || 0) - (p2.z || 0);
-        return Math.sqrt(x * x + y * y + z * z);
-    };
-
-    // Helper: Hash string to color
-    const stringToColor = (str) => {
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            hash = str.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-        return '#' + '00000'.substring(0, 6 - c.length) + c;
-    }
-
-    const toStableFallbackKey = (obj) => {
-        const baseLabel = obj?.yolo_label || obj?.label || 'unknown';
-        const bbox = obj?.bbox || [0, 0, 0, 0];
-        const cx = Math.floor((((bbox[0] || 0) + (bbox[2] || 0)) / 2) / 96);
-        const cy = Math.floor((((bbox[1] || 0) + (bbox[3] || 0)) / 2) / 96);
-        const z = obj?.position?.z ?? 0;
-        const zb = Math.round(z * 2);
-        return `${baseLabel}_cell_${cx}_${cy}_${zb}`;
-    };
-
-    const normalizeDetection = (key, obj) => {
-        const position = obj?.position || {
-            x: obj?.x ?? 0,
-            y: obj?.y ?? 0,
-            z: obj?.z ?? 0
-        };
-        return {
-            id: key,
-            label: obj?.label || 'unknown',
-            yolo_label: obj?.yolo_label || obj?.label || 'unknown',
-            details: obj?.details || '',
-            confidence: Number(obj?.confidence ?? 0),
-            track_id: Number(obj?.track_id ?? -1),
-            position
-        };
-    };
-
-    const canonicalLabel = (obj) => (obj?.yolo_label || obj?.label || 'unknown');
-
-    // Handle Incoming Data
-    useEffect(() => {
-        if (lastMessage !== null) {
-            try {
-                const data = JSON.parse(lastMessage.data);
-                if (data.type === 'detection' && Array.isArray(data.objects)) {
-                    if (data.scan_id) {
-                        setActiveScanId(data.scan_id);
-                    }
-
-                    // --- PERSISTENCE BUFFER LOGIC (Spatial State Stream) ---
-                    const now = Date.now();
-                    const stateVector = data.state_vector || {};
-
-                    // 1. Update Buffer with incoming Frame State
-                    if (Object.keys(stateVector).length > 0) {
-                        Object.entries(stateVector).forEach(([key, vec]) => {
-                            persistenceMap.current.set(key, { ...normalizeDetection(key, vec), lastSeen: now });
-                        });
-                    } else if (data.objects) {
-                        // Fallback for legacy format or untracked objects
-                        data.objects.forEach(obj => {
-                            const key = obj.track_id > -1 ? `${obj.label}_${obj.track_id}` : toStableFallbackKey(obj);
-                            persistenceMap.current.set(key, { ...normalizeDetection(key, obj), lastSeen: now });
-                        });
-                    }
-
-                    // 2. Prune Stale Items (> 500ms)
-                    // This handles YOLO flicker. If object missing for < 0.5s, keep showing it.
-                    for (const [key, val] of persistenceMap.current.entries()) {
-                        if (now - val.lastSeen > 1800) {
-                            persistenceMap.current.delete(key);
-                        }
-                    }
-
-                    // 3. Render State
-                    const liveSnapshot = Array.from(persistenceMap.current.values());
-                    setLiveDetections(liveSnapshot);
-                    // -------------------------------------------------------
-
-                    // --- LIVE DIFF LOGIC (uses same persistence snapshot as LIVE INTERCEPT) ---
-                    if (isLiveDiff && Object.keys(referenceObjects).length > 0) {
-                        const events = [];
-                        const newTraj = { ...trajectoriesRef.current };
-                        const newLastSeen = { ...lastSeenRef.current };
-                        const liveKeys = new Set();
-
-                        liveSnapshot.forEach(liveObj => {
-                            const key = canonicalLabel(liveObj);
-                            const display = liveObj?.label || key;
-                            liveKeys.add(key);
-
-                            if (!newTraj[key]) newTraj[key] = [];
-                            newTraj[key].push(liveObj.position);
-                            if (newTraj[key].length > 50) newTraj[key].shift();
-                            newLastSeen[key] = now;
-
-                            const refObj = referenceObjects[key];
-                            if (refObj) {
-                                const dist = getDistance(liveObj.position, refObj.position);
-                                if (dist > Number(diffThreshold)) {
-                                    events.push({ type: 'MOVE', label: display, distance: dist });
-                                }
-                            } else {
-                                events.push({ type: 'ADDED', label: display, distance: null });
-                            }
-                        });
-
-                        Object.keys(referenceObjects).forEach(refKey => {
-                            if (!liveKeys.has(refKey)) {
-                                events.push({
-                                    type: 'MISSING',
-                                    label: referenceObjects[refKey]?.display || refKey,
-                                    distance: null
-                                });
-                            }
-                        });
-
-                        trajectoriesRef.current = newTraj;
-                        lastSeenRef.current = newLastSeen;
-                        setTrajectories(newTraj);
-                        setLastSeen(newLastSeen);
-                        setDiffResult({
-                            summary: `LIVE: ${events.length} changes detected`,
-                            events
-                        });
-                    }
-
-                    // Update Stats
-                    setStats(prev => ({
-                        frames: prev.frames + 1,
-                        objects: prev.objects + data.objects.length,
-                        fps: Math.round(1000 / (Date.now() - prev.lastFrameTime || 1000)) || 30, // Rough estimate
-                        lastFrameTime: Date.now()
-                    }));
-                }
-            } catch (e) {
-                console.error("Parse error", e);
-            }
-        }
-    }, [lastMessage, isLiveDiff, referenceObjects, diffThreshold]);
+    const {
+        lastSeen,
+        liveDetections,
+        readyState,
+        resetLiveData,
+        stats,
+        trajectories
+    } = useDashboardSocket({ isLiveDiff, referenceObjects, diffThreshold, setDiffResult });
+    const {
+        handleSearch,
+        isSearching,
+        isSpeaking,
+        query,
+        runSearch,
+        searchAnswer,
+        searchResults,
+        setQuery,
+        speakAnswer
+    } = useSpatialQuery({ apiKey, diffResult, isLiveDiff });
+    const { isListening, startVoiceSearch } = useVoiceSearch({ apiKey, runSearch, setQuery });
 
     // 3D snapshot refresh every 3 seconds (non-realtime for stability)
     useEffect(() => {
@@ -202,212 +64,11 @@ export default function DashboardView() {
         return () => clearInterval(interval);
     }, [show3D, liveDetections]);
 
-    const fetchScans = async () => {
-        try {
-            const res = await fetch('/spatial/scans');
-            if (!res.ok) return;
-            const data = await res.json();
-            const scans = Array.isArray(data.scans) ? data.scans : [];
-            setScanList(scans);
-
-            if (!beforeScanId && scans.length > 0) {
-                setBeforeScanId(scans[0].scan_id);
-            }
-            if (!afterScanId && scans.length > 1) {
-                setAfterScanId(scans[1].scan_id);
-            } else if (!afterScanId && scans.length > 0) {
-                setAfterScanId(scans[0].scan_id);
-            }
-        } catch (err) {
-            console.error("Fetch scans failed:", err);
-        }
-    };
-
     useEffect(() => {
-        fetchScans();
-        const timer = setInterval(fetchScans, 5000);
-        return () => clearInterval(timer);
-    }, []);
-
-    const [searchAnswer, setSearchAnswer] = useState('');
-    const [isSearching, setIsSearching] = useState(false);
-    const [isListening, setIsListening] = useState(false);
-    const [isSpeaking, setIsSpeaking] = useState(false);
-
-    // Voice Search — uses browser SpeechRecognition API
-    const startVoiceSearch = () => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            alert('Speech recognition not supported in this browser');
-            return;
-        }
-        const recognition = new SpeechRecognition();
-        recognition.lang = 'en-US';
-        recognition.interimResults = false;
-        recognition.maxAlternatives = 1;
-
-        setIsListening(true);
-        recognition.start();
-
-        recognition.onresult = (event) => {
-            const transcript = event.results[0][0].transcript;
-            setQuery(transcript);
-            setIsListening(false);
-            // Auto-submit search
-            setTimeout(() => {
-                document.getElementById('search-form')?.requestSubmit();
-            }, 100);
-        };
-        recognition.onerror = () => setIsListening(false);
-        recognition.onend = () => setIsListening(false);
-    };
-
-    // TTS — speak the search answer aloud
-    const speakAnswer = (text) => {
-        if (!text || isSpeaking) return;
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1.0;
-        utterance.onstart = () => setIsSpeaking(true);
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-        speechSynthesis.cancel();
-        speechSynthesis.speak(utterance);
-    };
-
-    // Search Logic
-    const handleSearch = async (e) => {
-        e.preventDefault();
-        setIsSearching(true);
-        setSearchAnswer('');
-        setSearchResults([]);
-
-        try {
-            // Use relative URL (proxy)
-            const res = await fetch('/spatial/query', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': apiKey
-                },
-                body: JSON.stringify({
-                    query,
-                    top_k: 4,
-                })
-            });
-
-            if (!res.ok) {
-                const errText = await res.text();
-                setSearchAnswer(`Error: ${res.statusText}`);
-                setIsSearching(false);
-                return;
-            }
-
-            const data = await res.json();
-            setSearchAnswer(data.answer || "No synthesis available.");
-
-            // --- SMART SEARCH ENHANCEMENT ---
-            // If we have live diff results, cross-reference them!
-            let results = data.results || [];
-
-            if (isLiveDiff && diffResult && diffResult.events) {
-                results = results.map(res => {
-                    const relevantEvent = diffResult.events.find(ev =>
-                        res.description.toLowerCase().includes(ev.label.toLowerCase()) ||
-                        ev.label.toLowerCase().includes(res.label?.toLowerCase() || '')
-                    );
-
-                    if (relevantEvent) {
-                        return {
-                            ...res,
-                            description: `${res.description} \n\n⚠️ [LIVE INSIGHT]: This object appears to be ${relevantEvent.type} (Distance: ${relevantEvent.distance?.toFixed(2)}m)!`
-                        };
-                    }
-                    return res;
-                });
-            }
-            // --------------------------------
-
-            setSearchResults(results);
-        } catch (err) {
-            console.error("Search Exception:", err);
-            setSearchAnswer("Error: Network failed.");
-        } finally {
-            setIsSearching(false);
-        }
-    };
-
-    // Fetch Reference Objects for Live Diff
-    const toggleLiveDiff = async () => {
-        if (!isLiveDiff) {
-            // STARTING
-            if (!beforeScanId) {
-                alert("Please select a BEFORE scan as reference!");
-                return;
-            }
-            try {
-                const res = await fetch(`/spatial/memory/${beforeScanId}`);
-                if (!res.ok) throw new Error("Failed to fetch scan data");
-                const data = await res.json();
-
-                // Build map by canonical detector label (compatible with live yolo_label).
-                const refMap = {};
-                (data.detections || []).forEach(d => {
-                    const key = canonicalLabel(d);
-                    refMap[key] = {
-                        position: d.position_3d,
-                        display: d.gemini_name || d.label || key
-                    };
-                });
-                setReferenceObjects(refMap);
-                setIsLiveDiff(true);
-            } catch (e) {
-                alert("Error fetching reference scan: " + e.message);
-                setIsLiveDiff(false);
-            }
-        } else {
-            // STOPPING
-            setIsLiveDiff(false);
-            setDiffResult(null);
-        }
-    };
-
-    const handleRunDiff = async (e) => {
-        e.preventDefault();
-        if (!beforeScanId || !afterScanId) {
-            alert("Please select both before/after scans.");
-            return;
-        }
-        setDiffLoading(true);
-        try {
-            const res = await fetch('/spatial/diff', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': apiKey
-                },
-                body: JSON.stringify({
-                    scan_id_before: beforeScanId,
-                    scan_id_after: afterScanId,
-                    threshold: Number(diffThreshold),
-                })
-            });
-            if (!res.ok) {
-                const errText = await res.text();
-                console.error("Diff failed:", res.status, errText);
-                alert(`Diff failed: ${res.status} ${res.statusText}`);
-                setDiffResult(null);
-                return;
-            }
-            const data = await res.json();
-            setDiffResult(data);
-        } catch (err) {
-            console.error("Diff exception:", err);
-            alert("Diff error (see console)");
-            setDiffResult(null);
-        } finally {
-            setDiffLoading(false);
-        }
-    };
+        if (!isLiveDiff) return;
+        const interval = setInterval(() => setMotionNow(Date.now()), 1000);
+        return () => clearInterval(interval);
+    }, [isLiveDiff]);
 
     return (
         <div className="bg-background-dark min-h-screen text-slate-200 font-display selection:bg-primary selection:text-background-dark p-6 flex flex-col">
@@ -498,9 +159,7 @@ export default function DashboardView() {
                     {/* Force Refresh Button */}
                     <button
                         onClick={() => {
-                            setLiveDetections([]);
-                            setStats({ frames: 0, objects: 0, fps: 0 });
-                            setDiffResult(null);
+                            resetLiveData();
                             fetchScans();
                             window.location.reload(); // Hard reload as requested
                         }}
@@ -739,7 +398,7 @@ export default function DashboardView() {
                                             const mapZ = (z) => 50 + (z * 25);
 
                                             // Only show if active recently
-                                            if (Date.now() - (lastSeen[label] || 0) > 5000) return null;
+                                            if (motionNow - (lastSeen[label] || 0) > 5000) return null;
 
                                             const color = stringToColor(label);
 
@@ -786,18 +445,4 @@ export default function DashboardView() {
             </div>
         </div>
     );
-}
-
-function StatBox({ label, value, icon: Icon, color = "text-primary" }) {
-    return (
-        <div className="flex items-center space-x-3">
-            <div className={`p-2 rounded bg-slate-800/50 ${color}`}>
-                <Icon className="w-4 h-4" />
-            </div>
-            <div>
-                <div className="text-[10px] font-mono text-slate-500 tracking-wider">{label}</div>
-                <div className={`text-lg font-bold font-mono ${color}`}>{value}</div>
-            </div>
-        </div>
-    )
 }

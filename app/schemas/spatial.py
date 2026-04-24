@@ -23,6 +23,9 @@ class SpatialQueryResult(BaseModel):
     description: str
     frame_url: str
     yolo_data: list[dict[str, Any]] = Field(default_factory=list)
+    position: Optional[Position3D] = None
+    yolo_label: str = ""
+    track_id: int = -1
 
 
 class SpatialQueryResponse(BaseModel):

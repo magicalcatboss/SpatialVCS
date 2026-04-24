@@ -6,6 +6,7 @@ from app.schemas.common import BoundingBox, Position3D
 
 
 class Detection(BaseModel):
+    object_key: str = ""
     label: str
     confidence: float = 0.0
     track_id: int = -1
@@ -17,6 +18,7 @@ class Detection(BaseModel):
 
 
 class DetectionRecord(BaseModel):
+    object_key: str = ""
     label: str = ""
     yolo_label: str = ""
     gemini_name: str = ""
@@ -27,6 +29,7 @@ class DetectionRecord(BaseModel):
 
 
 class GeminiObject(BaseModel):
+    object_key: str = ""
     name: str = ""
     position: Position3D | str = Field(default_factory=Position3D)
     details: str = ""
@@ -39,8 +42,12 @@ class GeminiObject(BaseModel):
 
 
 class BroadcastObject(BaseModel):
+    object_key: str = ""
     label: str = ""
     yolo_label: str = ""
+    canonical_label: str = ""
+    label_confidence: float = 0.0
+    label_source: str = ""
     details: str = ""
     confidence: float = 0.0
     track_id: int = -1
@@ -49,6 +56,7 @@ class BroadcastObject(BaseModel):
 
 
 class StateVectorEntry(BaseModel):
+    object_key: str = ""
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
@@ -56,6 +64,9 @@ class StateVectorEntry(BaseModel):
     track_id: int = -1
     label: str = ""
     yolo_label: str = ""
+    canonical_label: str = ""
+    label_confidence: float = 0.0
+    label_source: str = ""
 
 
 class GeminiLabelCacheEntry(BaseModel):
